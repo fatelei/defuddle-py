@@ -426,16 +426,7 @@ def _get_author(doc: BeautifulSoup, schema_org_data: Any, meta_tags: list[MetaTa
                 unique = unique[:10]
             return ", ".join(unique)
 
-    return (
-        _get_meta_content(meta_tags, "name", "copyright")
-        or _get_schema_property(schema_org_data, "copyrightHolder.name")
-        or _get_meta_content(meta_tags, "property", "og:site_name")
-        or _get_schema_property(schema_org_data, "publisher.name")
-        or _get_schema_property(schema_org_data, "sourceOrganization.name")
-        or _get_schema_property(schema_org_data, "isPartOf.name")
-        or _get_meta_content(meta_tags, "name", "twitter:creator")
-        or _get_meta_content(meta_tags, "name", "application-name")
-    )
+    return ""
 
 
 def _get_site(
