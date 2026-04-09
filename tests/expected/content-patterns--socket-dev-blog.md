@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/content-patterns--socket-dev-blog.md

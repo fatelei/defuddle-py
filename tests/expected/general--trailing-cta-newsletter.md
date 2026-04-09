@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/general--trailing-cta-newsletter.md

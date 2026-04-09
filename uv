@@ -1,0 +1,16 @@
+  × No solution found when resolving dependencies:
+  × No solution found when resolving dependencies:
+  ╰─▶ Because remove was not found in the package registry and defuddle:dev
+      depends on remove, we can conclude that defuddle:dev's requirements
+      are unsatisfiable.
+      And because your project requires defuddle:dev, we can conclude that
+      your project's requirements are unsatisfiable.
+  ╰─▶ Because remove was not found in the package registry and defuddle:dev
+      depends on remove, we can conclude that defuddle:dev's requirements
+      are unsatisfiable.
+      And because your project requires defuddle:dev, we can conclude that
+      your project's requirements are unsatisfiable.
+  help: If you want to add the package regardless of the failed resolution,
+        provide the `--frozen` flag to skip locking and syncing.
+  help: If you want to add the package regardless of the failed resolution,
+        provide the `--frozen` flag to skip locking and syncing.

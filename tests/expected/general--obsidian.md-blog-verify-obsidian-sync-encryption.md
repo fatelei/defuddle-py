@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/general--obsidian.md-blog-verify-obsidian-sync-encryption.md

@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/elements--lazy-image.md

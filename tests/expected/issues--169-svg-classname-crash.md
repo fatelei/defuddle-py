@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/issues--169-svg-classname-crash.md

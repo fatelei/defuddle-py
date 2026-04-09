@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/footnotes--hr-strong-numbered.md

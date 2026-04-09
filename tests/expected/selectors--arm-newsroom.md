@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/selectors--arm-newsroom.md

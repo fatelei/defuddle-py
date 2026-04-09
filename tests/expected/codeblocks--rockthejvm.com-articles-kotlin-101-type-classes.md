@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/codeblocks--rockthejvm.com-articles-kotlin-101-type-classes.md

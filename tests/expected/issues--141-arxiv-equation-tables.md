@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/issues--141-arxiv-equation-tables.md

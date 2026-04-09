@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/content-patterns--trailing-related-posts.md

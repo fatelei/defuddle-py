@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/general--github.com-test-owner-test-repo-pull-42.md

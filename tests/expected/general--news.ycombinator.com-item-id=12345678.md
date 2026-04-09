@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/general--news.ycombinator.com-item-id=12345678.md

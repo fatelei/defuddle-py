@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/footnotes--maggieappleton.com-xanadu-patterns.md

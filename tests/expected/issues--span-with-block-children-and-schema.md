@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/issues--span-with-block-children-and-schema.md

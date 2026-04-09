@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/issues--159-lean-verso-missing-section-gap.md

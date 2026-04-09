@@ -1,0 +1,1 @@
+/Users/fatelei/github/defuddle/tests/expected/metadata--date-adjacent-category-link.md
