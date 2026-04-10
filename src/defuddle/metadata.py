@@ -245,8 +245,9 @@ def parse_date_text(text: str) -> str:
         return ""
 
     # "26 February 2025" or "Wednesday, 26 February 2025"
-    match = re.match(
-        r".*\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})\b",
+    # Note: No \b after year to allow matching dates in combined text like "July 13, 20235 min read"
+    match = re.search(
+        r"\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})",
         text, re.IGNORECASE,
     )
     if match:
@@ -255,8 +256,9 @@ def parse_date_text(text: str) -> str:
         return f"{match.group(3)}-{month}-{day}T00:00:00+00:00"
 
     # "February 26, 2025" or "June 5, 2023"
-    match = re.match(
-        r".*\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})\b",
+    # Note: No \b after year to allow matching dates in combined text like "July 13, 20235 min read"
+    match = re.search(
+        r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})",
         text, re.IGNORECASE,
     )
     if match:
