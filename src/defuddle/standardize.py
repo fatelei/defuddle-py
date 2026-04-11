@@ -90,6 +90,175 @@ def _remove_metadata_block(element: Tag, metadata: Metadata) -> None:
         sibling = sibling.next_sibling
 
 
+
+def standardize_callouts(element, doc):
+    """Standardize callout elements from various sources to div.callout[data-callout]."""
+    from bs4 import Tag, NavigableString
+
+    def create_callout(callout_type, title, content_source):
+        callout = doc.new_tag("div")
+        callout["data-callout"] = callout_type
+        callout["class"] = "callout"
+
+        title_div = doc.new_tag("div")
+        title_div["class"] = "callout-title"
+        title_inner = doc.new_tag("div")
+        title_inner["class"] = "callout-title-inner"
+        title_inner.string = title
+        title_div.append(title_inner)
+        callout.append(title_div)
+
+        content_div = doc.new_tag("div")
+        content_div["class"] = "callout-content"
+        for child in list(content_source.children):
+            content_div.append(child.extract())
+        callout.append(content_div)
+        return callout
+
+    # GitHub markdown alerts (div.markdown-alert)
+    for el in list(element.select(".markdown-alert")):
+        if not isinstance(el, Tag):
+            continue
+        classes = el.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        type_class = next((c for c in classes if c.startswith("markdown-alert-") and c != "markdown-alert"), None)
+        callout_type = type_class.replace("markdown-alert-", "") if type_class else "note"
+        title = callout_type.capitalize()
+        title_el = el.select_one(".markdown-alert-title")
+        if title_el:
+            title_el.decompose()
+        callout = create_callout(callout_type, title, el)
+        el.replace_with(callout)
+
+    # Callout asides (aside with class containing "callout")
+    for el in list(element.select('aside[class*="callout"]')):
+        if not isinstance(el, Tag):
+            continue
+        classes = el.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        type_class = next((c for c in classes if c.startswith("callout-")), None)
+        callout_type = type_class.replace("callout-", "") if type_class else "note"
+        title = callout_type.capitalize()
+        content_el = el.select_one(".callout-content")
+        source = content_el if content_el else el
+        callout = create_callout(callout_type, title, source)
+        el.replace_with(callout)
+
+    # Bootstrap alerts (div.alert.alert-*)
+    for el in list(element.select('.alert[class*="alert-"]')):
+        if not isinstance(el, Tag):
+            continue
+        if el.get("data-callout"):
+            continue
+        classes = el.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        type_class = next((c for c in classes if c.startswith("alert-") and c != "alert-dismissible"), None)
+        callout_type = type_class.replace("alert-", "") if type_class else "note"
+        title_el = el.select_one(".alert-heading, .alert-title")
+        title = title_el.get_text(strip=True) if title_el else callout_type.capitalize()
+        if title_el:
+            title_el.decompose()
+        callout = create_callout(callout_type, title, el)
+        el.replace_with(callout)
+
+
+def _merge_verso_code_blocks(root):
+    """Merge adjacent verso code blocks (Lean/Lean4) into a single block."""
+    from bs4 import Tag, NavigableString
+
+    _trailing_newline_re = re.compile(r"\r?\n$")
+
+    def get_code_node(pre):
+        code = None
+        for child in pre.children:
+            if not isinstance(child, Tag):
+                continue
+            if child.name != "code":
+                return None
+            if code is not None:
+                return None
+            code = child
+        return code
+
+    def get_language(code):
+        data_lang = (code.get("data-lang", "") or "").lower()
+        if data_lang:
+            return data_lang
+        classes = code.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        class_name = " ".join(classes)
+        match = re.search(r"(?:^|\s)language-([a-z0-9_+-]+)(?:\s|$)", class_name, re.IGNORECASE)
+        return match.group(1).lower() if match else ""
+
+    candidates = root.select('pre[data-verso-code="true"]')
+    parent_ids = set()
+    for candidate in candidates:
+        parent = candidate.parent
+        if parent and isinstance(parent, Tag):
+            parent_ids.add(id(parent))
+
+    parent_elements = [el for el in root.find_all(True) if isinstance(el, Tag) and id(el) in parent_ids]
+
+    for container in parent_elements:
+        children = list(container.children)
+        i = 0
+        while i < len(children):
+            start_node = children[i]
+            if not isinstance(start_node, Tag) or start_node.name != "pre":
+                i += 1
+                continue
+            if start_node.get("data-verso-code") != "true":
+                i += 1
+                continue
+
+            start_code = get_code_node(start_node)
+            if not start_code:
+                i += 1
+                continue
+            language = get_language(start_code)
+            if language not in ("lean", "lean4"):
+                i += 1
+                continue
+
+            run = [{"pre": start_node, "code": start_code}]
+            between_whitespace = []
+            j = i + 1
+
+            while j < len(children):
+                node = children[j]
+                if isinstance(node, NavigableString) and not str(node).strip():
+                    between_whitespace.append(node)
+                    j += 1
+                    continue
+                if not isinstance(node, Tag) or node.name != "pre":
+                    break
+                if node.get("data-verso-code") != "true":
+                    break
+                code = get_code_node(node)
+                if not code or get_language(code) != language:
+                    break
+                run.append({"pre": node, "code": code})
+                j += 1
+
+            if len(run) > 1:
+                texts = [re.sub(r"\r?\n$", "", item["code"].get_text() or "", count=1) for item in run]
+                merged = "\n".join(texts)
+                merged = re.sub(r"\n{3,}", "\n\n", merged)
+                merged = re.sub(r"^\n+|\n+$", "", merged)
+                run[0]["code"].string = merged
+                for k in range(1, len(run)):
+                    run[k]["pre"].decompose()
+                for node in between_whitespace:
+                    if node.parent:
+                        node.extract()
+                children = list(container.children)
+            i += 1
+
+
 def content(element: Tag, metadata: Metadata, doc: BeautifulSoup, debug: bool = False) -> None:
     _standardize_spaces(element)
     _remove_html_comments(element)
@@ -101,9 +270,24 @@ def content(element: Tag, metadata: Metadata, doc: BeautifulSoup, debug: bool = 
 
     # Process element rules (code blocks, headings, math, footnotes)
     process_code_blocks(element, doc)
+    _merge_verso_code_blocks(element)
     process_headings(element, doc)
     process_math(element, doc)
     process_footnotes(element, doc)
+
+    # False-positive sup cleanup: unwrap <sup> that doesn't look like a footnote ref
+    for sup in list(element.find_all("sup")):
+        if not isinstance(sup, Tag):
+            continue
+        if sup.get("id"):
+            continue
+        child_tags = [c for c in sup.children if isinstance(c, Tag)]
+        if len(child_tags) == 1 and child_tags[0].name == "a":
+            a = child_tags[0]
+            a_id = a.get("id", "")
+            if isinstance(a_id, str) and a_id.startswith("fn:"):
+                continue
+            sup.replace_with(a.extract())
 
     if not debug:
         _flatten_wrapper_elements(element, doc)
@@ -362,6 +546,17 @@ def _standardize_elements(element: Tag, doc: BeautifulSoup) -> None:
         if outer_code and isinstance(outer_code, Tag) and outer_code.name == "code":
             outer_code.replace_with(pre)
 
+    # arXiv LaTeXML: Remove hidden ltx_note_outer spans (duplicated footnote marks)
+    for outer in list(element.select("span.ltx_note_outer")):
+        outer.decompose()
+
+    # arXiv LaTeXML: Replace ltx_ref links with their plain text
+    for link in list(element.select("a.ltx_ref")):
+        ref_tag = link.select_one("span.ltx_ref_tag, span.ltx_text.ltx_ref_tag")
+        if ref_tag:
+            text_node = NavigableString(link.get_text() or "")
+            link.replace_with(text_node)
+
 
 def _transform_list_element(el: Tag, doc: BeautifulSoup) -> None:
     first_item = el.select_one('div[role="listitem"] .label')
@@ -419,6 +614,17 @@ def _should_preserve_element(el: Tag) -> bool:
 
     if tag_name in PRESERVE_ELEMENTS:
         return True
+
+    # Preserve callout elements
+    if el.get("data-callout"):
+        return True
+
+    # Preserve elements inside callouts
+    parent = el.parent
+    while parent and isinstance(parent, Tag):
+        if isinstance(parent, Tag) and parent.get("data-callout"):
+            return True
+        parent = parent.parent
 
     role = el.get("role", "")
     if role in ("article", "main", "navigation", "banner", "contentinfo"):
@@ -500,6 +706,10 @@ def _flatten_wrapper_elements(element: Tag, doc: BeautifulSoup) -> None:
 
         tag_name = (el.name or "").lower()
         if not tag_name:
+            return False
+
+        # Never process allowed-empty elements (iframe, img, etc.)
+        if tag_name in ALLOWED_EMPTY_ELEMENTS:
             return False
 
         # Case 1: Truly empty element (no text, no children, not allowed empty)
@@ -597,6 +807,9 @@ def _flatten_wrapper_elements(element: Tag, doc: BeautifulSoup) -> None:
                 continue
             if el.parent != element:
                 continue
+            tag_name = (el.name or "").lower()
+            if tag_name in ALLOWED_EMPTY_ELEMENTS:
+                continue
             children = el.find_all(recursive=False)
             only_paragraphs = children and all(c.name == "p" for c in children if isinstance(c, Tag))
             if only_paragraphs or (not _should_preserve_element(el) and _is_wrapper_element(el)):
@@ -613,6 +826,9 @@ def _strip_unwanted_attributes(element: Tag, debug: bool = False) -> None:
             return
         tag_name = (el.name or "").lower()
         if tag_name == "svg":
+            return
+        # Skip all elements inside SVG (SVG has its own attribute namespace)
+        if el.find_parent("svg"):
             return
 
         attrs_to_remove = []

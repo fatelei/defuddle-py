@@ -9,6 +9,8 @@ from copy import deepcopy
 from typing import Any, Optional
 
 from bs4 import BeautifulSoup, Tag
+from bs4.formatter import HTMLFormatter
+from bs4.dammit import EntitySubstitution
 
 from defuddle.constants import (
     ENTRY_POINT_ELEMENTS,
@@ -24,6 +26,20 @@ from defuddle import standardize
 from defuddle import content_patterns
 from defuddle import markdown as markdown_module
 from defuddle.extractors.registry import find_extractor
+
+class _UnsortedFormatter(HTMLFormatter):
+    """HTML formatter that preserves attribute order and uses HTML entity substitution."""
+
+    def __init__(self):
+        super().__init__(entity_substitution=EntitySubstitution.substitute_html)
+
+    def attributes(self, tag):
+        """Yield attributes in their original order (no sorting)."""
+        yield from tag.attrs.items()
+
+
+_UNSORTED_FORMATTER = _UnsortedFormatter()
+
 
 # Pre-compiled regex patterns for JSON-LD content cleaning
 _HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
@@ -90,7 +106,7 @@ class Defuddle:
         # This is critical because parse() may call _parse_internal multiple times
         # with different options (e.g., retry without partial selectors)
         from copy import copy as shallow_copy
-        doc = BeautifulSoup(str(self._doc), "html.parser")
+        doc = BeautifulSoup(self._doc.decode(formatter=_UNSORTED_FORMATTER), "html.parser")
         
         # Temporarily replace self._doc with the clone for this parse run
         original_doc = self._doc
@@ -237,6 +253,8 @@ class Defuddle:
         scoring.score_and_remove(self._doc, self._debug, main_content=main_content)
 
         # Remove clutter using selectors
+        # Standardize callouts BEFORE selector removal (so .alert classes aren't stripped)
+        standardize.standardize_callouts(main_content, self._doc)
         if options.remove_exact_selectors or options.remove_partial_selectors:
             self._remove_by_selector(
                 options.remove_exact_selectors, options.remove_partial_selectors,
@@ -254,7 +272,7 @@ class Defuddle:
         # Resolve relative URLs to absolute
         self._resolve_relative_urls(main_content, options.url)
 
-        content = main_content.decode_contents()
+        content = main_content.decode_contents(formatter=_UNSORTED_FORMATTER)
         word_count = self._count_words(content)
         parse_time = int((time.time() - start_time) * 1000)
 
@@ -479,6 +497,11 @@ class Defuddle:
             for el in to_remove:
                 if el.parent is not None:
                     if main_content is not None and self._is_or_contains(el, main_content):
+                        continue
+                    # Skip elements that contain <pre> (code blocks), or are pre/code themselves
+                    if el.name in ('pre', 'code') or el.find_parent(['pre', 'code']):
+                        continue
+                    if el.find('pre'):
                         continue
                     # Skip elements inside code blocks that are part of syntax highlighting
                     parent_pre_code = el.find_parent(['pre', 'code'])

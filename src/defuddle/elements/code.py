@@ -367,19 +367,24 @@ def _process_single_code_block(el: Tag, doc: BeautifulSoup) -> None:
         code_content = _extract_structured_text(el)
 
     # Normalize content
-    code_content = code_content.strip()
+    is_verso_lean = _element_matches(el, "code.hl.block, pre.hl.lean.lean-output")
     code_content = code_content.replace("\t", "    ")
     code_content = code_content.replace("\u00a0", " ")
     code_content = _CODE_THREE_NEWLINES_RE.sub("\n\n", code_content)
-    code_content = _CODE_LEADING_NL_RE.sub("", code_content)
-    code_content = _CODE_TRAILING_NL_RE.sub("", code_content)
+    if is_verso_lean:
+        # Preserve trailing newlines for verso lean (needed for merging)
+        code_content = _CODE_LEADING_NL_RE.sub("", code_content)
+    else:
+        code_content = code_content.strip()
+        code_content = _CODE_LEADING_NL_RE.sub("", code_content)
+        code_content = _CODE_TRAILING_NL_RE.sub("", code_content)
 
     # Remove header/toolbar siblings
     _remove_code_header_siblings(el)
 
     # Create new pre > code element
     new_html = "<pre>"
-    if _element_matches(el, "code.hl.block, pre.hl.lean.lean-output"):
+    if is_verso_lean:
         new_html = '<pre data-verso-code="true">'
 
     code_attrs = ""
@@ -427,5 +432,8 @@ def process_code_blocks(element: Tag, doc: BeautifulSoup, options: Optional[dict
         if el.parent is None:
             continue
         if id(el) in processed_pres:
+            continue
+        # Skip already-processed verso pres (created by code.hl.block container processing)
+        if el.get("data-verso-code") == "true":
             continue
         _process_single_code_block(el, doc)

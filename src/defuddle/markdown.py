@@ -128,6 +128,8 @@ class _DefuddleConverter(markdownify.MarkdownConverter):
         if code is not None:
             lang = _get_code_language(code)
             code_text = code.get_text()
+            # Remove trailing newlines before closing fence
+            code_text = code_text.rstrip("\n\r")
             # Escape backticks
             clean_code = code_text.replace("`", "\\`")
             if lang:
@@ -137,7 +139,7 @@ class _DefuddleConverter(markdownify.MarkdownConverter):
         # No <code> inside <pre>, use default behavior
         if not text.strip():
             return ""
-        return f"\n\n```\n{text}\n```\n\n"
+        return f"\n\n```\n{text.rstrip(chr(10) + chr(13))}\n```\n\n"
 
     def convert_math(self, el, text, parent_tags):
         """Convert <math> elements to LaTeX markdown notation."""
@@ -277,6 +279,74 @@ class _DefuddleConverter(markdownify.MarkdownConverter):
         if "footnote-backref" in (el.get("class", []) or []):
             return ""
         return super().convert_a(el, text, parent_tags)
+
+    def convert_ul(self, el, text, parent_tags):
+        """Convert <ul> elements - use single newline prefix for top-level lists."""
+        in_list = "li" in parent_tags or "ul" in parent_tags or "ol" in parent_tags
+        if not in_list:
+            return "\n" + text.strip() + "\n"
+        return super().convert_ul(el, text, parent_tags)
+
+    def convert_div(self, el, text, parent_tags):
+        """Convert <div> elements - handle callouts specially."""
+        from bs4 import Tag
+        callout_type = el.get("data-callout")
+        if callout_type:
+            from bs4 import Tag
+            title_inner = el.select_one(".callout-title-inner")
+            if title_inner is None:
+                ch = [c for c in el.children if isinstance(c, Tag)]
+                if ch:
+                    inner = ch[0].find(True)
+                    if inner:
+                        title_inner = inner
+            title = title_inner.get_text(strip=True) if title_inner else (callout_type[0].upper() + callout_type[1:])
+            content_el = el.select_one(".callout-content")
+            if content_el is None:
+                ch = [c for c in el.children if isinstance(c, Tag)]
+                if len(ch) >= 2:
+                    content_el = ch[1]
+            if content_el:
+                callout_content = self.convert(content_el.decode_contents()).strip()
+            else:
+                callout_content = text.strip()
+                if title and callout_content.startswith(title):
+                    callout_content = callout_content[len(title):].strip()
+            lines = callout_content.split("\n")
+            quoted_content = "\n".join(f"> {line}" for line in lines)
+            return f"\n\n> [!{callout_type}] {title}\n{quoted_content}\n\n"
+        return text
+
+    def convert_iframe(self, el, text, parent_tags):
+        """Convert <iframe> elements - handle YouTube and Twitter embeds."""
+        src = el.get("src", "") or ""
+        if src:
+            youtube_match = re.match(
+                r"(?:https?://)?(?:www\.)?(?:youtube(?:-nocookie)?\.com|youtu\.be)/(?:embed/|watch\?v=)?([A-Za-z0-9_-]+)",
+                src
+            )
+            if youtube_match and youtube_match.group(1):
+                video_id = youtube_match.group(1)
+                return f"\n![](https://www.youtube.com/watch?v={video_id})\n"
+            x_direct = re.match(
+                r"(?:https?://)?(?:www\.)?(?:twitter\.com|x\.com)/([^/]+)/status/([0-9]+)",
+                src
+            )
+            if x_direct:
+                return f"\n![](https://x.com/{x_direct.group(1)}/status/{x_direct.group(2)})\n"
+            x_embed = re.match(
+                r"(?:https?://)?(?:platform\.)?twitter\.com/embed/Tweet\.html\?.*?id=([0-9]+)",
+                src
+            )
+            if x_embed:
+                return f"\n![](https://x.com/i/status/{x_embed.group(1)})\n"
+        attrs_parts = []
+        for k, v in el.attrs.items():
+            if isinstance(v, list):
+                v = " ".join(v)
+            attrs_parts.append(f'{k}="{v}"')
+        attrs_str = " ".join(attrs_parts)
+        return f"\n\n<iframe {attrs_str}></iframe>\n\n" if attrs_str else "\n\n<iframe></iframe>\n\n"
 
     def convert_img(self, el, text, parent_tags):
         """Convert <img> elements with srcset support."""

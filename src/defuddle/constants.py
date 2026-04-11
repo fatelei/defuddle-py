@@ -96,8 +96,8 @@ EXACT_SELECTORS = [
     "#title",
     "#Title",
     "#articleTag",
-    '[href*="/category"]',
-    '[href*="/categories"]',
+    # '[href*="/category"]',  # see issue #131
+    # '[href*="/categories"]',  # see issue #131
     '[href*="/tag/"]',
     '[href*="/tags/"]',
     '[href*="/topics"]',
@@ -125,8 +125,6 @@ EXACT_SELECTORS = [
     "option",
     "select",
     "textarea",
-    "time",
-    "relative-time",
     "[hidden]",
     '[aria-hidden="true"]:not([class*="math"])',
     '[style*="display: none"]:not([class*="math"])',
@@ -149,7 +147,7 @@ EXACT_SELECTORS = [
     '[class*="clickable-icon" i]',
     'li span[class*="ltx_tag" i][class*="ltx_tag_item" i]',
     'a[href^="#"][class*="anchor" i]',
-    'a[href^="#"][class*="ref" i]',
+    'a[href^="#"][class*="ref" i]:not(.ltx_ref)',
     '[data-container*="most-viewed" i]',
     ".sidebar",
     ".Sidebar",
@@ -184,6 +182,8 @@ EXACT_SELECTORS = [
     '[data-orientation="vertical"]',
     ".gh-header-sticky",
     '[data-testid="issue-metadata-sticky"]',
+    '[role="listbox"]',
+    '[role="option"]',
 ]
 
 TEST_ATTRIBUTES = [
@@ -300,7 +300,7 @@ FOOTNOTE_LIST_SELECTORS = [
 
 FOOTNOTE_BACK_REFERENCES = [
     'a[href^="#"][class*="anchor"]',
-    'a[href^="#"][class*="ref"]',
+    'a[href^="#"][class*="ref"]:not(.ltx_ref)',
     'a[class*="footnote-backref"]',
     ".footnote-backref",
 ]
@@ -313,6 +313,7 @@ ALLOWED_EMPTY_ELEMENTS = frozenset({
 })
 
 ALLOWED_ATTRIBUTES = frozenset({
+    "data-callout", "data-callout-title",
     "alt", "allow", "allowfullscreen", "aria-label", "checked", "colspan", "controls",
     "data-latex", "data-src", "data-srcset", "data-lang", "dir", "display", "frameborder",
     "headers", "height", "href", "lang", "role", "rowspan", "src", "srcset", "title",

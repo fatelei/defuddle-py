@@ -24,6 +24,11 @@ FOOTNOTE_LIST_SELECTORS = ", ".join([
     "ol[class*='article-references']",
     "section.footnotes ol",
     "section[role='doc-endnotes']",
+    "section[role='doc-bibliography']",
+    "section[role='doc-footnotes']",
+    "ul.footnotes-list",
+    "ul.ltx_biblist",
+    "div[data-component-name='FootnoteToDOM']",
 ])
 
 FOOTNOTE_INLINE_REFERENCES = ", ".join([
