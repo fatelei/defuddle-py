@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
@@ -339,12 +339,29 @@ def remove_by_content_pattern(
                     link_el = el if el.name == "a" and el.get("href") else el.find("a", href=True)
                     if not link_el or not isinstance(link_el, Tag):
                         continue
+                    # For <a> elements, skip if they are embedded in prose (not before first heading)
+                    if el.name == "a":
+                        if first_heading and el not in first_heading.find_all_previous():
+                            continue
                     try:
                         href = link_el.get("href", "")
                         if isinstance(href, list):
                             href = " ".join(href)
-                        link_path = urlparse(href, url).path if href.startswith("/") else urlparse(href).path
-                        if link_path and link_path != "/" and link_path != url_path and url_path.startswith(link_path):
+                        # Use urljoin to properly resolve relative URLs (e.g. ../index.html)
+                        resolved = urljoin(url, href)
+                        link_path = urlparse(resolved).path
+                        link_dir = link_path.rstrip("/")
+                        if link_dir:
+                            link_dir = link_dir[:link_dir.rfind("/")+1] if "/" in link_dir else "/"
+                        # isParentIndex: link points to index.html/index.php in a parent directory
+                        link_path_lower = link_path.lower()
+                        is_parent_index = (
+                            (link_path_lower.endswith("/index.html") or link_path_lower.endswith("/index.php"))
+                            and url_path.startswith(link_dir)
+                        )
+                        if link_path and link_path != "/" and link_path != url_path and (
+                            url_path.startswith(link_path) or is_parent_index
+                        ):
                             el.decompose()
                     except Exception:
                         pass

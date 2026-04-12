@@ -155,41 +155,8 @@ class _DefuddleConverter(markdownify.MarkdownConverter):
             # The leading space is added by the NBSP in the paragraph wrapper
             return f"${latex}$"
         else:
-            # Inline math - check for surrounding whitespace
-            from bs4 import NavigableString
-            
-            prev = el.previous_sibling
-            next_node = el.next_sibling
-            
-            # Get the last character of previous text
-            prev_char = ""
-            if prev is not None and isinstance(prev, NavigableString):
-                prev_text = str(prev)
-                if prev_text:
-                    prev_char = prev_text[-1]
-            
-            # Get the first character of next text
-            next_char = ""
-            if next_node is not None and isinstance(next_node, NavigableString):
-                next_text = str(next_node)
-                if next_text:
-                    next_char = next_text[0]
-            
-            # Check if we need spaces
-            is_start_of_line = not prev or (isinstance(prev, NavigableString) and not str(prev).strip())
-            is_end_of_line = not next_node or (isinstance(next_node, NavigableString) and not str(next_node).strip())
-            
-            # Add left space if not at start and previous char is not whitespace or $
-            left_space = ""
-            if not is_start_of_line and prev_char and prev_char not in (" ", "\t", "\n", "$"):
-                left_space = " "
-            
-            # Add right space if not at end and next char is not whitespace or $
-            right_space = ""
-            if not is_end_of_line and next_char and next_char not in (" ", "\t", "\n", "$"):
-                right_space = " "
-            
-            return f"{left_space}${latex}${right_space}"
+            # Inline math - no extra spaces needed (JS turndown doesn't add them)
+            return f"${latex}$"
     
     def convert_p(self, el, text, parent_tags):
         """Convert <p> elements, preserving leading NBSP for display math."""
