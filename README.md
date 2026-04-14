@@ -93,25 +93,3 @@ print(result.content_markdown)
 uv run python -m pytest -q --tb=no
 ```
 
-## Release
-
-GitHub Actions supports publishing to PyPI from version tags.
-
-1. Configure **PyPI trusted publishing** for this repository on the `defuddle` project.
-2. Bump the version in `pyproject.toml`.
-3. Commit and push the version bump.
-4. Create and push a version tag:
-
-```bash
-git add pyproject.toml
-git commit -m "Release v0.1.1"
-git push origin main
-git tag v0.1.1
-git push origin v0.1.1
-```
-
-The `publish.yml` workflow will:
-
-- run the test suite
-- build the wheel and sdist with `uv build`
-- publish `dist/` to PyPI on `v*` tags
