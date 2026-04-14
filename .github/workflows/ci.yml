@@ -38,4 +38,4 @@ jobs:
         run: uv run python -m pytest -q --tb=no
 
       - name: Smoke test CLI
-        run: uv run defuddle tests/fixtures/general--www.figma.com-blog-introducing-codex-to-figma.html --json > /tmp/defuddle.json
+        run: uv run defuddle "${{ github.workspace }}/tests/fixtures/general--www.figma.com-blog-introducing-codex-to-figma.html" --json > /tmp/defuddle.json
