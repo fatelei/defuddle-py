@@ -28,6 +28,7 @@ FOOTNOTE_LIST_SELECTORS = ", ".join([
     "section[role='doc-footnotes']",
     "ul.footnotes-list",
     "ul.ltx_biblist",
+    "div.footnotes-footer",
     "div[data-component-name='FootnoteToDOM']",
 ])
 
@@ -85,7 +86,6 @@ class FootnoteHandler:
     ) -> Tag:
         """Create a standardized <li id="fn:N" class="footnote"> element."""
         new_item = self.doc.new_tag("li")
-        new_item["class"] = "footnote"
         new_item["id"] = f"fn:{footnote_number}"
 
         if isinstance(content, str):
@@ -96,6 +96,15 @@ class FootnoteHandler:
                 paragraph.append(child)
             new_item.append(paragraph)
         elif isinstance(content, Tag):
+            if content.name == "cite":
+                paragraph = self.doc.new_tag("p")
+                parsed = BeautifulSoup(str(content), "html.parser")
+                cite = parsed.find("cite")
+                if cite is not None:
+                    paragraph.append(cite)
+                self._remove_backrefs(paragraph)
+                new_item.append(paragraph)
+                return new_item
             block_tags = {
                 "div", "section", "article", "aside", "blockquote",
                 "dl", "figure", "footer", "form", "h1", "h2", "h3",
@@ -130,20 +139,6 @@ class FootnoteHandler:
                         clone = self._clone_tag(child)
                         self._remove_backrefs(clone)
                         new_item.append(clone)
-
-        # Add backlink to last paragraph
-        last_p = new_item.find("p")
-        if last_p is None:
-            last_p = new_item
-        for i, ref_id in enumerate(refs):
-            backlink = self.doc.new_tag("a")
-            backlink["href"] = f"#{ref_id}"
-            backlink["title"] = "return to article"
-            backlink["class"] = "footnote-backref"
-            backlink.string = "\u21a9"
-            if i < len(refs) - 1:
-                backlink.append(NavigableString(" "))
-            last_p.append(backlink)
 
         return new_item
 
@@ -248,7 +243,17 @@ class FootnoteHandler:
                     else:
                         match = re.search(r"cite_note-(.+)", li.get("id", ""))
                         id_val = match.group(1).lower() if match else li_id
-                    content = li
+                    reference_text = li.select_one(".reference-text")
+                    if isinstance(reference_text, Tag):
+                        reference_clone = self._clone_tag(reference_text)
+                        for backref in list(reference_clone.select(".mw-cite-backlink")):
+                            backref.decompose()
+                        for span in list(reference_clone.select(".reference-accessdate, .nowrap")):
+                            span.unwrap()
+                        reference_cite = reference_clone.find("cite")
+                        content = reference_cite if isinstance(reference_cite, Tag) else reference_clone
+                    else:
+                        content = li
 
                 if id_val and id_val not in processed_ids:
                     footnotes[footnote_count] = FootnoteData(
@@ -434,6 +439,40 @@ class FootnoteHandler:
         )
 
         if not containers:
+            ref_map: dict[str, tuple[int, Tag]] = {}
+            footnote_count = 1
+            for ref in element.select("sup.footnote-reference"):
+                if not isinstance(ref, Tag):
+                    continue
+                link = ref.find("a", href=True)
+                if not link or not isinstance(link, Tag):
+                    continue
+                href = str(link.get("href", ""))
+                frag = href.split("#")[-1] if "#" in href else ""
+                if not frag:
+                    continue
+                sidenote = ref.find_next_sibling("span", class_="sidenote")
+                if not sidenote or not isinstance(sidenote, Tag):
+                    continue
+                content_clone = self._clone_tag(sidenote)
+                for num_el in content_clone.select(".sidenote-number"):
+                    num_el.decompose()
+                num_match = re.search(r"(\d+)$", frag)
+                footnote_number = num_match.group(1) if num_match else str(footnote_count)
+                ref_id = f"fnref:{footnote_number}"
+                footnotes[footnote_count] = FootnoteData(
+                    content=content_clone,
+                    original_id=footnote_number,
+                    refs=[ref_id],
+                )
+                ref.replace_with(self.create_footnote_reference(footnote_number, ref_id))
+                sidenote.decompose()
+                for container in element.select("div.footnotes, div.footnote-definitions"):
+                    if container not in self.extra_containers_to_remove:
+                        self.extra_containers_to_remove.append(container)
+                footnote_count += 1
+            if footnotes:
+                return footnotes
             for sidenote in element.select("span.sidenote"):
                 sidenote.decompose()
             return footnotes
@@ -697,9 +736,33 @@ class FootnoteHandler:
                     container.insert_before(ref)
                 container.decompose()
 
+        # Detect if the original HTML had a labeled footnote section (e.g. GitHub Flavored Markdown
+        # uses <section data-footnotes> with an sr-only h2 heading "Footnotes"). That h2 gets
+        # stripped by _remove_by_selector before we run, so we check for the section attribute.
+        has_data_footnotes_section = bool(element.select("section[data-footnotes]"))
+
         # Create the standardized footnote list
         new_list = self.doc.new_tag("div")
         new_list["id"] = "footnotes"
+        existing_heading = None
+        for child in reversed(list(element.children)):
+            if not isinstance(child, Tag):
+                continue
+            if child.name == "br":
+                continue
+            existing_heading = child
+            break
+        if (
+            has_data_footnotes_section
+            and not (
+                isinstance(existing_heading, Tag)
+                and existing_heading.name in ("h1", "h2", "h3", "h4", "h5", "h6")
+                and existing_heading.get_text(" ", strip=True).lower() == "footnotes"
+            )
+        ):
+            heading = self.doc.new_tag("h2")
+            heading.string = "Footnotes"
+            new_list.append(heading)
         ordered_list = self.doc.new_tag("ol")
 
         all_footnotes = {**sidenotes, **footnotes}
@@ -862,6 +925,8 @@ class FootnoteHandler:
 
     def _remove_backrefs(self, el: Tag) -> None:
         """Remove back-reference links from footnote content."""
+        for backref in list(el.select(".mw-cite-backlink")):
+            backref.decompose()
         for a in list(el.select("a")):
             text = a.get_text(strip=True)
             text = re.sub(r"[\uFE0E\uFE0F]", "", text)

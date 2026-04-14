@@ -46,20 +46,30 @@ class SubstackExtractor(BaseExtractor):
             return
 
         # Fall back to Notes extraction
-        note_el = doc.select_one("div.ProseMirror.FeedProseMirror")
+        note_candidates = [
+            el for el in doc.select("div.ProseMirror.FeedProseMirror")
+            if isinstance(el, Tag)
+        ]
+        note_el = max(
+            note_candidates,
+            key=lambda el: len(el.get_text(" ", strip=True)),
+            default=None,
+        )
         if note_el:
             self._note_text = note_el
             # Check for sibling image grid
-            parent = note_el.parent
-            if parent:
-                sibling = parent.next_sibling
+            current: Optional[Tag] = note_el
+            while current and not self._note_image:
+                sibling = current.next_sibling
                 while sibling:
                     if isinstance(sibling, Tag):
                         sibling_class = " ".join(sibling.get("class", []))
                         if "imageGrid" in sibling_class:
                             self._note_image = sibling
-                        break
+                            break
                     sibling = sibling.next_sibling
+                parent = current.parent
+                current = parent if isinstance(parent, Tag) else None
 
     def can_extract(self) -> bool:
         return self._post_content_selector is not None or self._note_text is not None
@@ -142,7 +152,12 @@ class SubstackExtractor(BaseExtractor):
         if og_desc:
             description = og_desc.get("content", "")
 
-        author = re.sub(r"\s*\(@[^)]+\)\s*$", "", title).strip()
+        author = ""
+        meta_author = self._doc.select_one('meta[name="author"]')
+        if meta_author:
+            author = meta_author.get("content", "")
+        if not author:
+            author = re.sub(r"\s*\(@[^)]+\)\s*$", "", title).strip()
 
         return ExtractorResult(
             content=content,
@@ -212,6 +227,12 @@ class SubstackExtractor(BaseExtractor):
 
     def _build_image_html(self) -> str:
         if not self._note_image:
+            return ""
+
+        classes = self._note_image.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        if any("permalink" in cls for cls in classes):
             return ""
 
         og_image = self._doc.select_one('meta[property="og:image"]')

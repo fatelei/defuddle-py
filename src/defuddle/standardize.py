@@ -34,6 +34,9 @@ _wrapper_class_re = re.compile(
     re.IGNORECASE,
 )
 _empty_text_re = re.compile(r"^[\u200B\u200D\u200E\u200F\uFEFF\xA0\s]*$")
+_INLINE_TAGS = frozenset({"a", "abbr", "acronym", "b", "bdo", "big", "br", "cite",
+                          "code", "dfn", "em", "i", "kbd", "label", "q", "s", "samp",
+                          "small", "span", "strong", "sub", "sup", "time", "tt", "var"})
 _three_newlines_re = re.compile(r"\n{3,}")
 _leading_newlines_re = re.compile(r"^[\n\r\t]+")
 _trailing_newlines_re = re.compile(r"[\n\r\t]+$")
@@ -490,10 +493,8 @@ def _standardize_footnotes(element: Tag) -> None:
         for ref in element.select(selector):
             if ref.name != "sup":
                 sup = BeautifulSoup().new_tag("sup")
-                for child in list(ref.children):
-                    child.extract()
-                    sup.append(child)
                 ref.replace_with(sup)
+                sup.append(ref)
 
 
 def _standardize_elements(element: Tag, doc: BeautifulSoup) -> None:
@@ -557,6 +558,36 @@ def _standardize_elements(element: Tag, doc: BeautifulSoup) -> None:
             text_node = NavigableString(link.get_text() or "")
             link.replace_with(text_node)
 
+    # Unwrap single-column layout tables (used for styling/positioning, not data)
+    for table in list(element.select("table")):
+        if not isinstance(table, Tag) or table.parent is None:
+            continue
+        direct_cells = [
+            c for c in table.find_all(["td", "th"])
+            if isinstance(c, Tag) and _is_direct_table_child(c, table)
+        ]
+        # Skip data tables with header cells
+        if any(c.name == "th" for c in direct_cells):
+            continue
+        direct_rows = [
+            r for r in table.find_all("tr")
+            if isinstance(r, Tag) and _is_direct_table_child(r, table)
+        ]
+        if not direct_rows:
+            continue
+        # Check that every row has at most one direct cell
+        if not all(
+            len([c for c in direct_cells if c.parent is r]) <= 1
+            for r in direct_rows
+        ):
+            continue
+        # Unwrap: move all cell contents to replace the table
+        for cell in direct_cells:
+            for child in list(cell.children):
+                child.extract()
+                table.insert_before(child)
+        table.decompose()
+
 
 def _transform_list_element(el: Tag, doc: BeautifulSoup) -> None:
     first_item = el.select_one('div[role="listitem"] .label')
@@ -596,6 +627,16 @@ def _transform_list_item_element(el: Tag, doc: BeautifulSoup) -> None:
         el.replace_with(content_el)
 
 
+def _is_direct_table_child(el: Tag, table: Tag) -> bool:
+    """Check if el is a direct child of table (not in a nested table)."""
+    parent = el.parent
+    while parent and parent is not table:
+        if isinstance(parent, Tag) and parent.name == "table":
+            return False
+        parent = parent.parent
+    return parent is table
+
+
 def _has_direct_inline_content(el: Tag) -> bool:
     for child in el.children:
         if isinstance(child, NavigableString):
@@ -613,6 +654,8 @@ def _should_preserve_element(el: Tag) -> bool:
     tag_name = el.name.lower() if el.name else ""
 
     if tag_name in PRESERVE_ELEMENTS:
+        return True
+    if tag_name == "blockquote":
         return True
 
     # Preserve callout elements
@@ -632,6 +675,10 @@ def _should_preserve_element(el: Tag) -> bool:
 
     class_name = " ".join(el.get("class", []))
     if _semantic_class_re.search(class_name):
+        return True
+
+    # Preserve display-math-marker spans created by process_math
+    if "display-math-marker" in el.get("class", []):
         return True
 
     for child in el.children:
@@ -720,7 +767,8 @@ def _flatten_wrapper_elements(element: Tag, doc: BeautifulSoup) -> None:
             return True
 
         # Case 2: Top-level direct child containing only block elements
-        if el.parent == element:
+        # Skip semantic containers like <p> and headings that should be preserved.
+        if el.parent == element and tag_name not in ("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"):
             children = el.find_all(recursive=False)
             has_only_block = all(isinstance(c, Tag) and c.name not in INLINE_ELEMENTS for c in children)
             if has_only_block and children:
@@ -734,7 +782,7 @@ def _flatten_wrapper_elements(element: Tag, doc: BeautifulSoup) -> None:
 
         # Case 4: Element only contains text/inline - convert to <p>
         # Skip if already a <p> tag or a heading tag to avoid infinite loop / losing headings
-        if tag_name not in ("p", "h1", "h2", "h3", "h4", "h5", "h6"):
+        if tag_name not in ("p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote"):
             has_only_inline_or_text = True
             has_content = False
             for child in el.children:
@@ -809,6 +857,8 @@ def _flatten_wrapper_elements(element: Tag, doc: BeautifulSoup) -> None:
                 continue
             tag_name = (el.name or "").lower()
             if tag_name in ALLOWED_EMPTY_ELEMENTS:
+                continue
+            if tag_name == "blockquote":
                 continue
             children = el.find_all(recursive=False)
             only_paragraphs = children and all(c.name == "p" for c in children if isinstance(c, Tag))
@@ -923,19 +973,30 @@ def _remove_empty_elements(element: Tag) -> None:
 
 def _remove_trailing_headings(element: Tag) -> None:
     def has_content_after(el: Tag) -> bool:
+        # Check direct siblings
+        next_content = ""
         sibling = el.next_sibling
         while sibling:
             if isinstance(sibling, Tag):
-                if sibling.get_text(strip=True):
-                    return True
-            elif isinstance(sibling, NavigableString) and str(sibling).strip():
-                return True
+                next_content += sibling.get_text()
+            elif isinstance(sibling, NavigableString):
+                next_content += str(sibling)
             sibling = sibling.next_sibling
+        if next_content.strip():
+            return True
+        # If no content found at this level, check parent's siblings (JS behavior)
+        parent = el.parent
+        if parent and parent != element and isinstance(parent, Tag):
+            return has_content_after(parent)
         return False
 
-    for heading in element.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]):
+    # Process headings from bottom to top; stop at first heading with content after it
+    headings = list(element.find_all(["h1", "h2", "h3", "h4", "h5", "h6"]))
+    for heading in reversed(headings):
         if not has_content_after(heading):
             heading.decompose()
+        else:
+            break
 
 
 def _remove_orphaned_dividers(element: Tag) -> None:
@@ -983,6 +1044,13 @@ def _strip_extra_br_elements(element: Tag) -> None:
 
 
 def _remove_empty_lines(element: Tag, doc: BeautifulSoup) -> None:
+    def _is_inlineish_sibling(node: object) -> bool:
+        if isinstance(node, NavigableString):
+            return bool(str(node).strip())
+        if isinstance(node, Tag):
+            return node.name in _INLINE_TAGS
+        return False
+
     def remove_empty_text_nodes(node):
         if isinstance(node, Tag):
             tag = (node.name or "").lower()
@@ -998,7 +1066,25 @@ def _remove_empty_lines(element: Tag, doc: BeautifulSoup) -> None:
                 return
             text = str(node)
             if not text or _empty_text_re.match(text):
-                node.extract()
+                # Preserve whitespace before <math> elements as a single space,
+                # matching JS Turndown behavior where the \n text node becomes " "
+                next_sib = node.next_sibling
+                prev_sib = node.previous_sibling
+                if next_sib and isinstance(next_sib, Tag) and next_sib.name == "math":
+                    node.replace_with(NavigableString(" "))
+                elif (text.strip() == "" and text  # non-empty whitespace only
+                      and next_sib and isinstance(next_sib, Tag) and next_sib.name == "sup"
+                      and prev_sib and isinstance(prev_sib, Tag) and prev_sib.name == "sup"):
+                    # Preserve the space between consecutive inline <sup> elements
+                    node.replace_with(NavigableString(" "))
+                elif (text.strip() == "" and text  # non-empty whitespace only
+                      and _is_inlineish_sibling(next_sib)
+                      and _is_inlineish_sibling(prev_sib)):
+                    # Preserve space between adjacent inline/text siblings where the
+                    # source DOM used a whitespace node that markdownify would drop.
+                    node.replace_with(NavigableString(" "))
+                else:
+                    node.extract()
             else:
                 new_text = re.sub(r"[\n\r]+", " ", text)  # Collapse newlines to spaces
                 new_text = re.sub(r"\t+", " ", new_text)  # Tabs -> spaces

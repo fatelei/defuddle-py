@@ -40,8 +40,14 @@ _RELATED_HEADING_RE = re.compile(
     r"^(?:related (?:posts?|articles?|content|stories|reads?|reading)"
     r"|you (?:might|may|could) (?:also )?(?:like|enjoy|be interested in)"
     r"|read (?:next|more|also)|further reading|see also"
+    r"|recent posts?"
     r"|more (?:from|articles?|posts?|like this)|more to (?:read|explore)"
     r"|about (?:the )?author)$",
+    re.IGNORECASE,
+)
+_TRAILING_LINK_SECTION_HEADING_RE = re.compile(
+    r"^(?:next steps?|related (?:posts?|articles?|content|stories|reads?|reading)"
+    r"|read (?:next|more|also)|further reading|see also)$",
     re.IGNORECASE,
 )
 
@@ -90,6 +96,38 @@ def _walk_up_isolated(el: Tag, main_content: Tag) -> Tag:
     return target
 
 
+def _is_link_grid_container(el: Tag) -> bool:
+    if not isinstance(el, Tag) or el.name not in ("div", "section", "aside"):
+        return False
+    if el.find(["pre", "table", "img", "figure", "blockquote"]):
+        return False
+    links = [a for a in el.find_all("a", href=True) if a.get_text(" ", strip=True)]
+    if len(links) < 2:
+        return False
+    text = el.get_text(" ", strip=True)
+    if not text or _count_words(text) > 80:
+        return False
+    link_text_len = sum(len(a.get_text(" ", strip=True)) for a in links)
+    if link_text_len / max(len(text), 1) < 0.6:
+        return False
+    return True
+
+
+def _is_standalone_link_block(el: Tag) -> bool:
+    if not isinstance(el, Tag) or el.name not in ("p", "div", "section"):
+        return False
+    if el.find(["img", "figure", "blockquote", "table", "pre"]):
+        return False
+    links = el.find_all("a", href=True)
+    if len(links) != 1:
+        return False
+    text = el.get_text(" ", strip=True)
+    link_text = links[0].get_text(" ", strip=True)
+    if not text or not link_text or text != link_text:
+        return False
+    return _count_words(text) <= 4
+
+
 def _is_breadcrumb_list(list_el: Tag) -> bool:
     items = list_el.find_all("li", recursive=False)
     if not (2 <= len(items) <= 8):
@@ -126,7 +164,7 @@ def _is_newsletter_element(el: Tag, max_words: int) -> bool:
     if words < 2 or words > max_words:
         return False
     # Check for content elements
-    for content_tag in ["p", "img", "figure", "pre", "blockquote", "table"]:
+    for content_tag in ["img", "figure", "pre", "blockquote", "table"]:
         if el.find(content_tag):
             return False
     normalized = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
@@ -137,6 +175,10 @@ def remove_by_content_pattern(
     main_content: Tag, debug: bool = False, url: str = ""
 ) -> None:
     """Remove non-content patterns from within main_content."""
+
+    for el in list(main_content.select(".bcrumb, .breadcrumb, .breadcrumbs, .brdcrumb")):
+        if isinstance(el, Tag):
+            el.decompose()
 
     # --- Breadcrumb list ---
     first_list = main_content.find(["ul", "ol"])
@@ -153,6 +195,123 @@ def remove_by_content_pattern(
 
     # --- Hero header removal ---
     _remove_hero_header(main_content)
+    first_tag = next(
+        (child for child in main_content.children if isinstance(child, Tag) and child.name != "br"),
+        None,
+    )
+    if isinstance(first_tag, Tag):
+        text = first_tag.get_text(" ", strip=True)
+        images = first_tag.find_all(["img", "figure", "picture"])
+        if images and not text and len(images) <= 2 and not first_tag.find("a", href=True):
+            first_tag.decompose()
+        elif images and not text and len(images) <= 2 and first_tag.find("a", href=True):
+            nxt = first_tag.next_sibling
+            while nxt is not None and isinstance(nxt, NavigableString) and not str(nxt).strip():
+                nxt = nxt.next_sibling
+            if isinstance(nxt, Tag) and nxt.name in {"h5", "h6"} and _CONTENT_DATE_RE.search(nxt.get_text(" ", strip=True)):
+                first_tag.decompose()
+                nxt.decompose()
+
+    # --- Top-of-article table of contents headings ---
+    for heading in list(main_content.find_all(["h2", "h3", "h4", "h5", "h6"])):
+        if not isinstance(heading, Tag) or heading.parent is None:
+            continue
+        text = heading.get_text(" ", strip=True)
+        if text.lower() != "table of contents":
+            continue
+        if (main_content.get_text() or "").find(text) > 500:
+            continue
+        prev = heading.previous_sibling
+        while prev and isinstance(prev, NavigableString) and not str(prev).strip():
+            prev = prev.previous_sibling
+        if isinstance(prev, Tag) and prev.name == "svg":
+            prev.decompose()
+        heading.decompose()
+
+    # --- Decorative SVGs adjacent to headings ---
+    for heading in list(main_content.find_all(re.compile(r"^h[1-6]$"))):
+        if not isinstance(heading, Tag) or heading.parent is None:
+            continue
+        for direction in ("previous", "next"):
+            sibling = heading.previous_sibling if direction == "previous" else heading.next_sibling
+            while sibling and isinstance(sibling, NavigableString) and not str(sibling).strip():
+                sibling = sibling.previous_sibling if direction == "previous" else sibling.next_sibling
+            if not isinstance(sibling, Tag) or sibling.name != "svg":
+                continue
+            if sibling.get_text(" ", strip=True):
+                continue
+            width = sibling.get("width")
+            height = sibling.get("height")
+            if any(isinstance(dim, str) and dim.isdigit() and int(dim) > 240 for dim in (width, height)):
+                continue
+            sibling.decompose()
+
+    # --- Leading announcement / promo link block before first heading ---
+    first_heading = main_content.find(["h1", "h2", "h3"])
+    if first_heading and isinstance(first_heading, Tag):
+        def _is_leading_promo_candidate(el: Tag, isolated_sibling: bool = False) -> bool:
+            if not isinstance(el, Tag) or el.parent is None:
+                return False
+            if not isolated_sibling and el.name == "a" and isinstance(el.parent, Tag):
+                parent_words = _count_words(el.parent.get_text(" ", strip=True))
+                if parent_words > _count_words(el.get_text(" ", strip=True)) + 2:
+                    return False
+            if el.find(["h1", "h2", "h3", "article", "section", "main", "img", "picture"]):
+                return False
+            text = el.get_text(" ", strip=True)
+            if not text or _count_words(text) > 12:
+                return False
+            link_el = el if el.name == "a" and el.get("href") else el.find("a", href=True)
+            if not link_el or not isinstance(link_el, Tag):
+                return False
+            href = str(link_el.get("href", ""))
+            if not href or href.startswith("#"):
+                return False
+            link_text = link_el.get_text(" ", strip=True)
+            if not link_text or len(link_text) / max(len(text), 1) < 0.7:
+                return False
+            non_link_text = text.replace(link_text, "").strip(" -–—,:;")
+            if len(non_link_text) > 6:
+                return False
+            lowered = text.lower()
+            if (
+                lowered.startswith("you're invited")
+                or lowered.startswith("you’re invited")
+                or ("meet the" in lowered and "conference" in lowered)
+            ):
+                return True
+            return False
+
+        for el in list(first_heading.find_all_previous(["a", "div", "span", "p"])):
+            if not _is_leading_promo_candidate(el):
+                continue
+            text = el.get_text(" ", strip=True)
+            target = _walk_up_to_wrapper(el, text, main_content)
+            if target is not main_content:
+                target.decompose()
+        parent = first_heading.parent if isinstance(first_heading.parent, Tag) else None
+        if parent and parent is not main_content:
+            for el in list(first_heading.find_previous_siblings(["a", "div", "span", "p"])):
+                if not _is_leading_promo_candidate(el, isolated_sibling=True):
+                    continue
+                text = el.get_text(" ", strip=True)
+                target = _walk_up_to_wrapper(el, text, parent)
+                if target is not parent:
+                    target.decompose()
+                elif el.parent is not None:
+                    el.decompose()
+        current = first_heading
+        while isinstance(current, Tag) and current.parent and current.parent is not main_content:
+            for el in list(current.parent.find_previous_siblings(["a", "div", "span", "p"])):
+                if not _is_leading_promo_candidate(el, isolated_sibling=True):
+                    continue
+                text = el.get_text(" ", strip=True)
+                target = _walk_up_to_wrapper(el, text, main_content)
+                if target is not main_content:
+                    target.decompose()
+                elif el.parent is not None:
+                    el.decompose()
+            current = current.parent
 
     content_text = main_content.get_text() or ""
 
@@ -179,6 +338,15 @@ def remove_by_content_pattern(
         tag = el.name
         has_date = bool(_CONTENT_DATE_RE.search(text))
         pos = content_text.find(text)
+
+        if (
+            has_date
+            and _READ_TIME_RE.search(text)
+            and words <= 6
+            and re.match(r"^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)", text, re.IGNORECASE)
+        ):
+            el.decompose()
+            continue
 
         # Article metadata header block (DIV with date, near top, no punctuation)
         if (
@@ -216,7 +384,7 @@ def remove_by_content_pattern(
         if (
             has_date
             and _READ_TIME_RE.search(text)
-            and not el.find(["p", "div", "section", "article"])
+            and 0 <= pos <= 800
         ):
             cleaned = text
             cleaned = _METADATA_STRIP_MONTHS.sub("", cleaned)
@@ -279,6 +447,27 @@ def remove_by_content_pattern(
         if 0 <= pos <= 200 or 0 <= dist_from_end <= 200:
             target.decompose()
 
+    # --- Small byline/date blocks near the end ---
+    for el in main_content.find_all(["p", "div", "time"]):
+        if el.parent is None or not isinstance(el, Tag):
+            continue
+        if el.find(["p", "div", "section", "article", "img", "figure"]):
+            continue
+        text = el.get_text(" ", strip=True)
+        words = _count_words(text)
+        if not (1 <= words <= 10):
+            continue
+        pos = content_text.rfind(text)
+        dist_from_end = len(content_text) - (pos + len(text))
+        if pos < 0 or dist_from_end > 500:
+            continue
+        has_date = bool(_CONTENT_DATE_RE.search(text))
+        is_byline = bool(_STARTS_WITH_BY_RE.search(text))
+        if has_date or is_byline:
+            target = _walk_up_to_wrapper(el, text, main_content)
+            if target is not main_content:
+                target.decompose()
+
     # --- Metadata lists ---
     for list_el in main_content.find_all(["ul", "ol", "dl"]):
         if list_el.parent is None or not isinstance(list_el, Tag):
@@ -299,6 +488,8 @@ def remove_by_content_pattern(
         prev_sib = list_el.previous_sibling
         while prev_sib and isinstance(prev_sib, NavigableString) and not str(prev_sib).strip():
             prev_sib = prev_sib.previous_sibling
+        if isinstance(prev_sib, Tag) and prev_sib.name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+            continue
         if isinstance(prev_sib, Tag) and prev_sib.get_text(strip=True).endswith(":"):
             continue
         is_metadata = True
@@ -306,6 +497,12 @@ def remove_by_content_pattern(
             t = item.get_text(strip=True)
             w = _count_words(t)
             if w > 8 or re.search(r"[.!?]$", t):
+                is_metadata = False
+                break
+            # If any item has substantial non-link text (annotation/description), it's a content list
+            link_text = "".join(a.get_text() for a in item.find_all("a"))
+            non_link_text = t.replace(link_text, "").strip().lstrip("-–—").strip()
+            if len(non_link_text) > 3:
                 is_metadata = False
                 break
         if not is_metadata:
@@ -366,7 +563,114 @@ def remove_by_content_pattern(
                     except Exception:
                         pass
 
+    first_tag = next(
+        (child for child in main_content.children if isinstance(child, Tag) and child.name != "br"),
+        None,
+    )
+    if isinstance(first_tag, Tag):
+        classes = first_tag.get("class", [])
+        if isinstance(classes, str):
+            classes = classes.split()
+        if (
+            any(cls.lower() in {"breadcrumb", "breadcrumbs", "bcrumb", "brdcrumb"} for cls in classes)
+            and _count_words(first_tag.get_text(" ", strip=True)) <= 20
+        ):
+            first_tag.decompose()
+
+    # --- Leading standalone navigation links before the first heading ---
+    first_heading = next(
+        (child for child in main_content.children if isinstance(child, Tag) and child.name in ("h1", "h2", "h3")),
+        None,
+    )
+    if isinstance(first_heading, Tag):
+        leading_link_blocks: list[Tag] = []
+        sibling = first_heading.previous_sibling
+        while sibling is not None:
+            current = sibling
+            sibling = sibling.previous_sibling
+            if isinstance(current, NavigableString):
+                if str(current).strip():
+                    leading_link_blocks = []
+                    break
+                continue
+            if not isinstance(current, Tag) or not _is_standalone_link_block(current):
+                leading_link_blocks = []
+                break
+            leading_link_blocks.append(current)
+        if len(leading_link_blocks) >= 3:
+            for block in leading_link_blocks:
+                block.decompose()
+
+    # --- Utility/footer fragments commonly injected by publishing UIs ---
+    for el in list(main_content.find_all(True)):
+        if not isinstance(el, Tag):
+            continue
+        text = el.get_text(" ", strip=True)
+        lowered = text.lower()
+        if lowered in {"links to this page", "interactive graph"}:
+            el.decompose()
+            continue
+        if re.fullmatch(r"liked by \d+ people", lowered):
+            el.decompose()
+            continue
+
+    # --- Top comment widgets ---
+    for heading in list(main_content.find_all(["h2", "h3", "h4"])):
+        if not isinstance(heading, Tag):
+            continue
+        if heading.get_text(" ", strip=True).lower() != "top comment by":
+            continue
+        node: Optional[object] = heading
+        while node is not None:
+            current = node
+            node = current.next_sibling if hasattr(current, "next_sibling") else None
+            if isinstance(current, Tag):
+                current.decompose()
+                if isinstance(current, Tag) and current.find("a", href="#comments"):
+                    break
+
+    # --- Affiliate / shopping link lists ---
+    for heading in list(main_content.find_all(["h2", "h3", "h4"])):
+        if not isinstance(heading, Tag):
+            continue
+        if heading.get_text(" ", strip=True).lower() != "best accessories":
+            continue
+        nxt = heading.next_sibling
+        while nxt is not None and isinstance(nxt, NavigableString) and not str(nxt).strip():
+            nxt = nxt.next_sibling
+        if isinstance(nxt, Tag) and nxt.name in ("ul", "ol"):
+            heading.decompose()
+            nxt.decompose()
+
+    # --- Social icon bars ---
+    for el in list(main_content.find_all(["div", "p"])):
+        if not isinstance(el, Tag):
+            continue
+        links = el.find_all("a", href=True)
+        images = el.find_all("img")
+        text = el.get_text(" ", strip=True)
+        if len(links) >= 3 and len(images) >= 2 and not text:
+            el.decompose()
+
     # --- Trailing related posts block ---
+    trailing_children = [
+        child for child in main_content.children
+        if isinstance(child, Tag) and child.name != "br" and child.get_text(" ", strip=True)
+    ]
+    for idx, child in enumerate(trailing_children):
+        if child.name not in ("h1", "h2", "h3", "h4", "h5", "h6"):
+            continue
+        heading_text = child.get_text(" ", strip=True)
+        if not _TRAILING_LINK_SECTION_HEADING_RE.match(heading_text):
+            continue
+        trailing = trailing_children[idx + 1:]
+        if not trailing:
+            continue
+        if len(trailing) == 1 and _is_link_grid_container(trailing[0]):
+            child.decompose()
+            trailing[0].decompose()
+            break
+
     last_child = None
     for child in reversed(list(main_content.children)):
         if isinstance(child, Tag) and child.name not in ("hr", "br"):
@@ -387,6 +691,14 @@ def remove_by_content_pattern(
             elif child.name != "br":
                 has_non_para = True
                 break
+        if (not paras or len(paras) < 2) and last_child.name == "section":
+            nested_paras = [
+                p for p in last_child.find_all("p")
+                if isinstance(p, Tag) and p.get_text(strip=True)
+            ]
+            if len(nested_paras) >= 2:
+                paras = nested_paras
+                has_non_para = False
         if paras and not has_non_para and len(paras) >= 2:
             all_link_dense = True
             for p in paras:
@@ -407,6 +719,58 @@ def remove_by_content_pattern(
                     break
             if all_link_dense:
                 last_child.decompose()
+
+    # --- Trailing direct related post links ---
+    trailing_link_paras = []
+    for child in reversed(list(main_content.children)):
+        if isinstance(child, NavigableString):
+            if str(child).strip():
+                break
+            continue
+        if not isinstance(child, Tag):
+            break
+        if child.name == "br":
+            continue
+        if child.name != "p":
+            break
+        text = child.get_text(" ", strip=True)
+        links = child.find_all("a", href=True)
+        if not text or not (1 <= _count_words(text) <= 20) or len(links) < 2:
+            break
+        link_text_len = sum(len(a.get_text(" ", strip=True)) for a in links)
+        if link_text_len / max(len(text), 1) <= 0.55:
+            break
+        non_link_text = text
+        for a in links:
+            non_link_text = non_link_text.replace(a.get_text(" ", strip=True), "")
+        if re.search(r"[.!?]", non_link_text):
+            break
+        trailing_link_paras.append(child)
+    if len(trailing_link_paras) >= 2:
+        for p in trailing_link_paras:
+            if p.parent is not None:
+                p.decompose()
+
+    trailing_link_tags = []
+    for child in reversed(list(main_content.children)):
+        if isinstance(child, NavigableString):
+            if str(child).strip():
+                break
+            continue
+        if not isinstance(child, Tag):
+            break
+        if child.name == "br":
+            continue
+        if child.name != "a":
+            break
+        text = child.get_text(" ", strip=True)
+        if not text or _count_words(text) > 4:
+            break
+        trailing_link_tags.append(child)
+    if len(trailing_link_tags) >= 2:
+        for tag in trailing_link_tags:
+            if tag.parent is not None:
+                tag.decompose()
 
     # --- Trailing thin sections ---
     total_words = _count_words(main_content.get_text() or "")
@@ -440,7 +804,7 @@ def remove_by_content_pattern(
                 if isinstance(el, Tag)
             )
             has_content = any(
-                el.find(["pre", "table", "img", "figure", "p"])
+                el.find(["pre", "table", "img", "figure", "p", "ul", "ol"])
                 for el in trailing_els
                 if isinstance(el, Tag)
             )
@@ -487,6 +851,12 @@ def remove_by_content_pattern(
         heading_text = heading.get_text(strip=True)
         if not _RELATED_HEADING_RE.search(heading_text):
             continue
+        if heading_text.lower() == "see also":
+            nxt = heading.next_sibling
+            while nxt is not None and isinstance(nxt, NavigableString) and not str(nxt).strip():
+                nxt = nxt.next_sibling
+            if isinstance(nxt, Tag) and nxt.name in {"ul", "ol"} and len(nxt.find_all("li", recursive=False)) >= 2:
+                continue
         if content_text.find(heading_text) < 500:
             continue
         target = _walk_up_isolated(heading, main_content)
@@ -512,6 +882,16 @@ def remove_by_content_pattern(
             target = target.parent
         target.decompose()
         break
+
+    # --- Tiny standalone status monitors (e.g. FPS counters) ---
+    for el in main_content.find_all(["div", "p", "span"]):
+        if not isinstance(el, Tag) or el.parent is None:
+            continue
+        if el.find(["p", "div", "section", "article", "ul", "ol", "img", "figure"]):
+            continue
+        text = el.get_text(" ", strip=True)
+        if re.fullmatch(r"[A-Z]{2,8}:\s*(?:--|\d+(?:\.\d+)?)", text):
+            el.decompose()
 
 
 def _remove_hero_header(main_content: Tag) -> None:
@@ -543,6 +923,13 @@ def _remove_hero_header(main_content: Tag) -> None:
                     if isinstance(meta_el, Tag):
                         metadata_words += _count_words(meta_el.get_text())
                 prose_words = total_words - metadata_words
+                authorish_links = [
+                    link for link in current.find_all("a", href=True)
+                    if _count_words(link.get_text(" ", strip=True)) <= 4
+                ]
+                avatar_images = current.find_all("img")
+                if authorish_links and avatar_images and prose_words < 10:
+                    break
                 if prose_words < 30:
                     best_block = current
                 else:
@@ -550,6 +937,21 @@ def _remove_hero_header(main_content: Tag) -> None:
             current = current.parent
 
         if best_block:
+            hero_wrappers: list[Tag] = []
+            for candidate in best_block.find_all(["figure", "div"], recursive=True):
+                if not isinstance(candidate, Tag):
+                    continue
+                imgs = [
+                    img for img in candidate.find_all("img", src=True)
+                    if isinstance(img, Tag) and img.get("alt", "").strip()
+                ]
+                if imgs:
+                    hero_wrappers.append(candidate)
+            for wrapper in hero_wrappers[:1]:
+                fragment = BeautifulSoup(str(wrapper), "html.parser")
+                clone = next((child for child in fragment.contents if isinstance(child, Tag)), None)
+                if clone is not None:
+                    best_block.insert_before(clone)
             best_block.decompose()
             return
 

@@ -7,6 +7,39 @@ from typing import Optional
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
+
+def _mathml_to_latex(mathml: str) -> str:
+    """Convert MathML to LaTeX, preserving <mtext> whitespace like the JS library."""
+    from mathml_to_latex import MathMLToLaTeX
+    from mathml_to_latex.xml_to_mathml.services.xml_elements_to_mathml_element import (
+        ElementsToMathMLAdapter,
+    )
+
+    # Monkey-patch to preserve spaces in <mtext> (the library strips them otherwise,
+    # unlike the JS mathml-to-latex v1.5 which preserves them).
+    _orig = ElementsToMathMLAdapter._convert_element
+
+    def _patched(self, el):
+        result = _orig(self, el)
+        if el.tagName == "mtext" and el.firstChild:
+            raw = el.firstChild.nodeValue or ""
+            # Re-create with un-stripped value to preserve leading/trailing spaces
+            if raw != result.value:
+                from mathml_to_latex.el_to_tex.protocols import GenericMathMLElement
+                result = GenericMathMLElement(
+                    name=result.name,
+                    value=raw,
+                    children=result.children,
+                    attributes=result.attributes,
+                )
+        return result
+
+    ElementsToMathMLAdapter._convert_element = _patched
+    try:
+        return MathMLToLaTeX.convert(mathml)
+    finally:
+        ElementsToMathMLAdapter._convert_element = _orig
+
 _MATH_SELECTORS = ", ".join([
     # WordPress LaTeX images
     'img.latex[src*="latex.php"]',
@@ -51,17 +84,6 @@ def _is_block_display(el: Tag) -> bool:
     if display_attr == "block":
         return True
 
-    # Check MathJax v3: display="true"
-    if display_attr == "true":
-        return True
-
-    # Check script display mode
-    el_type = el.get("type", "")
-    if isinstance(el_type, list):
-        el_type = " ".join(el_type)
-    if el_type == "math/tex; mode=display":
-        return True
-
     # Check class names for display/block indicators
     classes = el.get("class", [])
     if isinstance(classes, str):
@@ -71,23 +93,7 @@ def _is_block_display(el: Tag) -> bool:
         if not ("inline" in class_str and "display" not in class_str):
             return True
 
-    # .mwe-math-fallback-image-display
-    if "mwe-math-fallback-image-display" in classes or "mwe-math-mathml-display" in classes:
-        return True
-
-    # KaTeX: inline by default, block only if inside .katex-display
-    if "katex" in classes and "katex-display" not in classes:
-        # Check ancestors for katex-display
-        for parent in el.parents:
-            if isinstance(parent, Tag):
-                parent_classes = parent.get("class", [])
-                if isinstance(parent_classes, str):
-                    parent_classes = parent_classes.split()
-                if "katex-display" in parent_classes:
-                    return True
-        return False
-
-    # Check container classes (closest ancestor with these classes)
+    # Check container classes (.katex-display, .MathJax_Display, [data-display="block"])
     for parent in el.parents:
         if not isinstance(parent, Tag):
             continue
@@ -99,22 +105,45 @@ def _is_block_display(el: Tag) -> bool:
         data_display = parent.get("data-display", "")
         if data_display == "block":
             return True
-        # Check MathJax v3 container display attr
-        p_display = parent.get("display", "")
-        if p_display == "true":
-            return True
         # Stop at block-level elements
         if parent.name in ("body", "html", "article", "section", "main"):
             break
 
-    # Check inner <math> element for display attribute
-    math_el = el.find("math")
-    if isinstance(math_el, Tag):
-        math_display = math_el.get("display", "")
-        if math_display == "block":
+    # Check if preceded by a <p> element (JS behavior: previous element sibling is <p> → block)
+    prev = el.previous_sibling
+    while prev is not None and isinstance(prev, NavigableString):
+        prev = prev.previous_sibling
+    if isinstance(prev, Tag) and prev.name == "p":
+        return True
+
+    # .mwe-math-fallback-image-display
+    if "mwe-math-fallback-image-display" in classes or "mwe-math-mathml-display" in classes:
+        return True
+
+    # KaTeX: inline by default, block only if inside .katex-display
+    if "katex" in classes and "katex-display" not in classes:
+        return False
+
+    # Check script display mode
+    el_type = el.get("type", "")
+    if isinstance(el_type, list):
+        el_type = " ".join(el_type)
+    if el_type == "math/tex; mode=display":
+        return True
+
+    # Check MathJax v3: display="true"
+    if display_attr == "true":
+        return True
+
+    # Check parent container display="true" (MathJax v3)
+    for parent in el.parents:
+        if not isinstance(parent, Tag):
+            continue
+        p_display = parent.get("display", "")
+        if p_display == "true":
             return True
-        if math_display == "inline":
-            return False
+        if parent.name in ("body", "html", "article", "section", "main"):
+            break
 
     return False
 
@@ -247,7 +276,7 @@ def process_math(element: Tag, doc: BeautifulSoup) -> None:
 
 def _process_math_element(el: Tag, doc: BeautifulSoup) -> None:
     """Process a single math element."""
-    if el.attrs is None:
+    if el.parent is None or el.attrs is None:
         return
 
     # Skip if already processed (has data-latex and xmlns attributes)
@@ -255,10 +284,30 @@ def _process_math_element(el: Tag, doc: BeautifulSoup) -> None:
         return
 
     latex = _get_latex_from_element(el)
-    if not latex:
-        latex = ""
     mathml = _get_mathml_from_element(el)
     is_block = _is_block_display(el)
+
+    # If no LaTeX but we have MathML, convert it (mirrors JS mathml-to-latex)
+    if not latex and mathml:
+        try:
+            latex = _mathml_to_latex(mathml)
+        except Exception:
+            return
+
+    if not latex:
+        latex = ""
+
+    classes = el.get("class", [])
+    if isinstance(classes, str):
+        classes = classes.split()
+    if (
+        not is_block
+        and "katex" in classes
+        and not el.select_one('annotation[encoding="application/x-tex"]')
+        and re.fullmatch(r"[A-Za-z0-9]+", latex)
+    ):
+        el.replace_with(NavigableString(""))
+        return
 
     math_tag = doc.new_tag("math")
     math_tag["xmlns"] = "http://www.w3.org/1998/Math/MathML"
@@ -267,7 +316,7 @@ def _process_math_element(el: Tag, doc: BeautifulSoup) -> None:
     if latex:
         math_tag["data-latex"] = latex
 
-    if mathml and not latex:
+    if mathml and not math_tag.get("data-latex"):
         math_soup = BeautifulSoup(mathml, "html.parser")
         inner_math = math_soup.find("math")
         if inner_math:
@@ -276,8 +325,6 @@ def _process_math_element(el: Tag, doc: BeautifulSoup) -> None:
                     math_tag.append(child.extract())
                 else:
                     math_tag.append(NavigableString(str(child)))
-        elif latex:
-            math_tag.string = latex
     elif latex:
         math_tag.string = latex
 
@@ -302,4 +349,3 @@ def _process_math_element(el: Tag, doc: BeautifulSoup) -> None:
                 for s in list(parent.select(sel)):
                     if isinstance(s, Tag):
                         s.decompose()
-

@@ -231,6 +231,9 @@ def _initialize_builtins(registry: Registry) -> None:
     # Substack (notes and posts)
     registry.register(ExtractorMapping(
         patterns=[
+            "substack.com",
+            "substack-app",
+            re.compile(r"^https?://[^/]+\.substack\.com/.*"),
             re.compile(r"^https?://substack\.com/@[^/]+/note/.+"),
             re.compile(r"^https?://substack\.com/home/post/p-\d+"),
         ],

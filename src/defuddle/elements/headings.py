@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from bs4 import BeautifulSoup, Tag
@@ -18,12 +19,17 @@ def _is_permalink_anchor(el: Tag) -> bool:
     if isinstance(href, list):
         href = " ".join(href)
     if href.startswith("#") or "#" in href:
+        text = el.get_text(" ", strip=True)
+        if text and text not in ("#", "\u00b6", "\u00a7", "\U0001f517"):
+            return False
         return True
 
     classes = el.get("class", [])
     if isinstance(classes, str):
         classes = classes.split()
     if "anchor" in classes:
+        return True
+    if any("mw-editsection" in cls for cls in classes):
         return True
 
     # Check for common permalink symbols
@@ -47,6 +53,8 @@ def _is_heading_nav_element(el: Tag) -> bool:
     if "anchor" in classes:
         return True
     if tag in ("span", "div"):
+        if any("mw-editsection" in cls for cls in classes):
+            return True
         anchor = el.select_one('a[href^="#"]')
         if anchor and isinstance(anchor, Tag):
             return True
@@ -66,10 +74,15 @@ def _clean_heading(heading: Tag, doc: BeautifulSoup) -> None:
     if heading.attrs is None:
         return
 
+    # Replace <br> with a space to preserve word boundaries
+    from bs4 import NavigableString as _NS
+    for br in list(heading.find_all("br")):
+        br.replace_with(_NS(" "))
+
     # Fast path: no child elements
     children = [c for c in heading.children if isinstance(c, Tag)]
     if not children:
-        text = heading.get_text(strip=True)
+        text = heading.get_text(" ", strip=True)
         new_heading = doc.new_tag(heading.name)
         for attr_name in list(heading.attrs.keys()):
             if attr_name in ALLOWED_ATTRIBUTES:
@@ -101,11 +114,13 @@ def _clean_heading(heading: Tag, doc: BeautifulSoup) -> None:
             el.decompose()
 
     # Get text content
-    text_content = heading.get_text(strip=True)
+    text_content = heading.get_text(" ", strip=True)
 
     # If we lost all text, use navigation text
     if not text_content and navigation_texts:
         text_content = navigation_texts[0]
+    if any(text.lower() == "edit" for text in navigation_texts):
+        text_content = re.sub(r"\s+edit$", "", text_content, flags=re.IGNORECASE)
 
     if text_content:
         new_heading = doc.new_tag(heading.name)

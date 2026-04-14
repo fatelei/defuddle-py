@@ -1,0 +1,4 @@
+name: defuddle-py
+version: 0.1.0
+description: Extract cleaned webpage content and metadata with the local defuddle-py repository.
+prompt_file: skill.md

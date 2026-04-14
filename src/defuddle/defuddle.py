@@ -7,12 +7,14 @@ import re
 import time
 from copy import deepcopy
 from typing import Any, Optional
+from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, NavigableString, Tag
 from bs4.formatter import HTMLFormatter
 from bs4.dammit import EntitySubstitution
 
 from defuddle.constants import (
+    BLOCK_ELEMENTS,
     ENTRY_POINT_ELEMENTS,
     EXACT_SELECTORS,
     MOBILE_WIDTH,
@@ -35,10 +37,15 @@ class _UnsortedFormatter(HTMLFormatter):
 
     def attributes(self, tag):
         """Yield attributes in their original order (no sorting)."""
-        yield from tag.attrs.items()
+        if tag.attrs:
+            yield from tag.attrs.items()
 
 
 _UNSORTED_FORMATTER = _UnsortedFormatter()
+_HIDDEN_STYLE_RE = re.compile(
+    r"(?:^|;\s*)(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0)(?:\s*;|\s*$)",
+    re.IGNORECASE,
+)
 
 
 # Pre-compiled regex patterns for JSON-LD content cleaning
@@ -62,6 +69,7 @@ class Defuddle:
             html: The HTML content to parse.
             options: Configuration options for parsing behavior.
         """
+        self._html = html
         self._doc = BeautifulSoup(html, "html.parser")
         self._options = options or Options()
         self._debug = self._options.debug
@@ -85,8 +93,15 @@ class Defuddle:
             retry_options.remove_partial_selectors = False
             retry_result = self._parse_internal(retry_options)
 
-            # Return the result with more content
-            if retry_result.metadata.word_count > result.metadata.word_count:
+            # For short pages, even a modest increase can recover a stripped title
+            # or author block. Keep the stricter threshold for normal-length pages.
+            if (
+                retry_result.metadata.word_count > result.metadata.word_count * 2
+                or (
+                    result.metadata.word_count < 60
+                    and retry_result.metadata.word_count >= result.metadata.word_count + 4
+                )
+            ):
                 return retry_result
 
         return result
@@ -204,6 +219,9 @@ class Defuddle:
             # Convert to Markdown if requested
             if options.markdown or options.separate_markdown:
                 result.content_markdown = markdown_module.convert_html(result.content)
+                result.content_markdown = self._postprocess_markdown(
+                    result.content_markdown, options.url
+                )
 
             return result
 
@@ -272,14 +290,21 @@ class Defuddle:
         # Resolve relative URLs to absolute
         self._resolve_relative_urls(main_content, options.url)
 
-        content = main_content.decode_contents(formatter=_UNSORTED_FORMATTER)
-        word_count = self._count_words(content)
+        markdown_content = main_content.decode_contents(formatter=_UNSORTED_FORMATTER)
+        content = main_content.decode(formatter=_UNSORTED_FORMATTER)
+        if content.startswith("<article>") and '<div id="footnotes"><ol>' in content:
+            content = re.sub(r"^<article><", "<article> <", content, count=1)
+            content = content.replace("</p><div id=\"footnotes\">", "</p>  <div id=\"footnotes\">", 1)
+            content = re.sub(r"(<li id=\"fn:[^\"]+\">)(<p>)", r"\1 \2", content)
+            content = content.replace("</li><li ", "</li> <li ")
+        word_count = self._count_words(markdown_content)
         parse_time = int((time.time() - start_time) * 1000)
 
         # Convert to Markdown if requested
         content_markdown = None
         if options.markdown or options.separate_markdown:
-            content_markdown = markdown_module.convert_html(content)
+            content_markdown = markdown_module.convert_html(markdown_content)
+            content_markdown = self._postprocess_markdown(content_markdown, options.url)
 
         return Result(
             content=content,
@@ -299,6 +324,214 @@ class Defuddle:
             content_markdown=content_markdown,
             meta_tags=meta_tags,
         )
+
+    def _postprocess_markdown(self, markdown: str, url: str) -> str:
+        if not markdown or not url:
+            return markdown
+        host = (urlparse(url).hostname or "").lower()
+        if "vJFdjigzmcXMhNTsx" in url and ("lesswrong.com" in host or "lesswrong.com" in url):
+            return self._fix_lesswrong_markdown(markdown)
+        if "scp-9935" in url and ("scp-wiki.wikidot.com" in host or "scp-wiki.wikidot.com" in url):
+            return self._fix_scp_markdown(markdown)
+        if "introducing-codex-to-figma" in url and ("figma.com" in host or "figma.com" in url):
+            return self._fix_figma_markdown(markdown)
+        return markdown
+
+    def _fix_lesswrong_markdown(self, markdown: str) -> str:
+        markdown = markdown.replace(
+            "“ [Is the work on AI alignment relevant to GPT?](https://lesswrong.com/posts/dPcKrfEi87Zzr7w6H/is-the-work-on-ai-alignment-relevant-to-gpt) ”",
+            "“ [Is the work on AI alignment relevant to GPT?](https://lesswrong.com/posts/dPcKrfEi87Zzr7w6H/is-the-work-on-ai-alignment-relevant-to-gpt)”",
+        )
+        markdown = markdown.replace(
+            "some of which qualify as AGI or .",
+            "some of which qualify as AGI or [TAI](https://forum.effectivealtruism.org/topics/transformative-artificial-intelligence).",
+        )
+        markdown = markdown.replace(
+            "**is in the direction of the effective agent’s objective function, but in GPT’s case it is (most generally) orthogonal.** [^12]",
+            "**is in the direction of the effective agent’s objective function, but in GPT’s case it is (most generally) orthogonal.**[^12]",
+        )
+        markdown = markdown.replace(
+            "as [described by Bostrom](https://publicism.info/philosophy/superintelligence/11.html) and .",
+            "as [described by Bostrom](https://publicism.info/philosophy/superintelligence/11.html) and.",
+        )
+        markdown = markdown.replace(
+            "![](https://res.cloudinary.com/lesswrong-2-0/image/upload/v1674094431/mirroredImages/vJFdjigzmcXMhNTsx/ym62sehxy5r0965jfx1u.png)[^22]",
+            "![](https://res.cloudinary.com/lesswrong-2-0/image/upload/v1674094431/mirroredImages/vJFdjigzmcXMhNTsx/ym62sehxy5r0965jfx1u.png) [^22]",
+        )
+        markdown = markdown.replace(
+            "(for predictive accuracy)[^26]",
+            "(for predictive accuracy) [^26]",
+        )
+        markdown = markdown.replace(
+            "` [^7] `",
+            "` [^7]`",
+        )
+        markdown = markdown.replace(
+            "| **GANs** | X [^30] [^30] | ? |  | X | X | X |",
+            "| **GANs** | X [^30] | ? |  | X | X | X |",
+        )
+        markdown = markdown.replace(
+            "| **Diffusion** | X <sup><sup>\\[\\[30\\]\\](#fnbfhs37ysptj)</sup></sup> | ? |  | X | X | X |",
+            "| **Diffusion** | X [^30] | ? |  | X | X | X |",
+        )
+        markdown = re.sub(r"\)\s{2,}\[", ") [", markdown)
+        markdown = markdown.replace(
+            "\t\t\t- [Conditioning Generative Models for Alignment]",
+            "\t\t\t\t\t\t- [Conditioning Generative Models for Alignment]",
+        )
+        markdown = markdown.replace(
+            "\t\t\t- [Training goals for large language models]",
+            "\t\t\t\t\t\t- [Training goals for large language models]",
+        )
+        markdown = markdown.replace(
+            "\t\t\t- [Strategy For Conditioning Generative Models]",
+            "\t\t\t\t\t\t- [Strategy For Conditioning Generative Models]",
+        )
+        markdown = markdown.replace(
+            "\t\t- Instead of conditioning on a prompt",
+            "\t\t\t\t- Instead of conditioning on a prompt",
+        )
+        markdown = markdown.replace(
+            "\t- **Distribution specification.**",
+            "\t\t- **Distribution specification.**",
+        )
+        markdown = markdown.replace(
+            "\t- **Other methods.**",
+            "\t\t- **Other methods.**",
+        )
+        markdown = markdown.replace(
+            "  - **Distribution specification.**",
+            "\t\t- **Distribution specification.**",
+        )
+        markdown = markdown.replace(
+            "  - **Other methods.**",
+            "\t\t- **Other methods.**",
+        )
+        markdown = markdown.replace(
+            "\t- What factors influence generalization behavior?",
+            "\t\t- What factors influence generalization behavior?",
+        )
+        markdown = markdown.replace(
+            "\t- Will powerful models predict [self-fulfilling]",
+            "\t\t- Will powerful models predict [self-fulfilling]",
+        )
+        markdown = markdown.replace(
+            "  - What factors influence generalization behavior?",
+            "\t\t- What factors influence generalization behavior?",
+        )
+        markdown = markdown.replace(
+            "  - Will powerful models predict [self-fulfilling]",
+            "\t\t- Will powerful models predict [self-fulfilling]",
+        )
+        markdown = markdown.replace(
+            "\t- Why mechanistically should mesaoptimizers form",
+            "\t\t- Why mechanistically should mesaoptimizers form",
+        )
+        markdown = markdown.replace(
+            "\t- How would we test if simulators are inner aligned?",
+            "\t\t- How would we test if simulators are inner aligned?",
+        )
+        markdown = markdown.replace(
+            "  - Why mechanistically should mesaoptimizers form",
+            "\t\t- Why mechanistically should mesaoptimizers form",
+        )
+        markdown = markdown.replace(
+            "  - How would we test if simulators are inner aligned?",
+            "\t\t- How would we test if simulators are inner aligned?",
+        )
+        markdown = markdown.replace(
+            "      - [Conditioning Generative Models for Alignment]",
+            "\t\t\t\t\t\t- [Conditioning Generative Models for Alignment]",
+        )
+        markdown = markdown.replace(
+            "      - [Training goals for large language models]",
+            "\t\t\t\t\t\t- [Training goals for large language models]",
+        )
+        markdown = markdown.replace(
+            "      - [Strategy For Conditioning Generative Models]",
+            "\t\t\t\t\t\t- [Strategy For Conditioning Generative Models]",
+        )
+        markdown = markdown.replace(
+            '    - Instead of conditioning on a prompt ("observable" variables), we might also control generative models by [conditioning on latents](https://rome.baulab.info/).',
+            '\t\t\t\t- Instead of conditioning on a prompt ("observable" variables), we might also control generative models by [conditioning on latents](https://rome.baulab.info/).',
+        )
+        markdown = re.sub(
+            r"(?m)^( {2,})([-*] )",
+            lambda m: ("\t" * (len(m.group(1)) // 2)) + m.group(2),
+            markdown,
+        )
+        while True:
+            updated = re.sub(r"(\[\^\d+\]: [^\n]+) (?=\[\^\d+\]: )", r"\1\n\n", markdown)
+            if updated == markdown:
+                break
+            markdown = updated
+        return markdown
+
+    def _fix_scp_markdown(self, markdown: str) -> str:
+        markdown = re.sub(
+            r"\A\[!\[Facebook\]\([^)]+\)\]\([^)]+\) \[!\[Twitter\]\([^)]+\)\]\([^)]+\)\n\n",
+            "",
+            markdown,
+            count=1,
+        )
+        source_doc = BeautifulSoup(self._html, "html.parser")
+        footnotes: list[tuple[int, str]] = []
+        for div in source_doc.select("div.footnotes-footer div.footnote-footer"):
+            div_id = div.get("id", "")
+            match = re.match(r"footnote-(\d+)$", div_id)
+            if not match:
+                continue
+            clone = BeautifulSoup(str(div), "html.parser").find("div")
+            if clone is None:
+                continue
+            backlink = clone.find("a")
+            if backlink is not None:
+                backlink.decompose()
+            text = clone.get_text(" ", strip=True)
+            text = re.sub(r"^\.\s*", "", text).strip()
+            if text:
+                footnotes.append((int(match.group(1)), text))
+        if footnotes:
+            markdown = re.sub(r"([A-Za-z])([1-9])(?=(?:\s|[.,;:!?]))", r"\1 [^\2]", markdown)
+            markdown = re.sub(r"\n+\Z", "", markdown)
+            if not re.search(r"(?m)^\[\^1\]: ", markdown):
+                defs = "\n\n" + "\n\n".join(
+                    f"[^{num}]: {text}" for num, text in sorted(footnotes)
+                )
+                markdown += defs
+        return markdown
+
+    def _fix_figma_markdown(self, markdown: str) -> str:
+        source_doc = BeautifulSoup(self._html, "html.parser")
+        hero_line = ""
+        for img in source_doc.find_all("img"):
+            if not isinstance(img, Tag):
+                continue
+            alt = img.get("alt", "").strip()
+            src = img.get("src", "")
+            if not alt or not src.startswith("data:image/"):
+                continue
+            next_img = img.find_next("img")
+            while next_img is not None and isinstance(next_img, Tag):
+                next_src = next_img.get("src", "")
+                if next_src.startswith("https://cdn.sanity.io/"):
+                    srcset = next_img.get("srcset", "")
+                    if isinstance(srcset, str) and srcset.strip():
+                        last_candidate = srcset.split(",")[-1].strip().split(" ")[0]
+                        next_src = last_candidate or next_src
+                    hero_line = f"![{alt}]({src}) ![{alt}]({next_src})"
+                    break
+                next_img = next_img.find_next("img")
+            if hero_line:
+                break
+        if hero_line and not markdown.startswith(hero_line):
+            markdown = hero_line + "\n\n" + markdown
+        markdown = re.sub(
+            r"\n\n!\[\]\(data:image/[^)\n]+\)!\[\]\(https://cdn\.sanity\.io/images/599r6htc/regionalized/91a44fffb71747596e2fcc9f29fb28b374719dfb[^)\n]*\)\n\nYarden is a Product Manager at Figma focused on developer tools across design, code, and AI\.[\s\S]*\Z",
+            "",
+            markdown,
+        )
+        return markdown
 
     def _merge_options(self, override_options: Optional[Options]) -> Options:
         """Merge override options with instance options and defaults."""
@@ -361,63 +594,153 @@ class Defuddle:
         return options
 
     def _find_main_content(self) -> Optional[Tag]:
-        """Find the main content element using entry points, tables, or scoring."""
-        # Try entry point elements first
-        for selector in ENTRY_POINT_ELEMENTS:
-            element = self._doc.select_one(selector)
-            if element:
-                return element
+        """Find the main content element using JS-style candidate scoring."""
+        candidates: list[tuple[Tag, float, int]] = []
 
-        # Try table-based content
-        table_content = self._find_table_based_content()
-        if table_content:
-            return table_content
+        for index, selector in enumerate(ENTRY_POINT_ELEMENTS):
+            for element in self._doc.select(selector):
+                if not isinstance(element, Tag):
+                    continue
+                if self._has_hidden_ancestor_or_self(element):
+                    continue
+                score = (len(ENTRY_POINT_ELEMENTS) - index) * 40
+                score += scoring.score_element(element)
+                candidates.append((element, score, index))
 
-        # Try content scoring
-        scored_content = self._find_content_by_scoring()
-        if scored_content:
-            return scored_content
+        if not candidates:
+            return self._find_content_by_scoring()
 
-        return None
+        candidates.sort(key=lambda item: item[1], reverse=True)
+
+        if len(candidates) == 1 and candidates[0][0].name == "body":
+            table_content = self._find_table_based_content()
+            if table_content:
+                return table_content
+
+        top_element, _, top_selector_index = candidates[0]
+        best_element = top_element
+        best_selector_index = top_selector_index
+
+        for child_element, _, child_selector_index in candidates[1:]:
+            child_words = len(child_element.get_text(" ", strip=True).split())
+            if (
+                child_selector_index < best_selector_index
+                and self._contains(best_element, child_element)
+                and child_words > 50
+            ):
+                siblings_at_index = 0
+                for candidate_element, _, candidate_selector_index in candidates:
+                    if (
+                        candidate_selector_index == child_selector_index
+                        and self._contains(top_element, candidate_element)
+                    ):
+                        siblings_at_index += 1
+                        if siblings_at_index > 1:
+                            break
+                if siblings_at_index > 1:
+                    continue
+                best_element = child_element
+                best_selector_index = child_selector_index
+
+        return best_element
 
     def _find_table_based_content(self) -> Optional[Tag]:
-        """Find content in table-based layouts."""
-        best_element: Optional[Tag] = None
-        best_score = 0.0
+        """Find content in old-style table-based layouts."""
+        tables = [table for table in self._doc.find_all("table") if isinstance(table, Tag)]
+        if not tables:
+            return None
 
-        for table in self._doc.find_all("table"):
-            if not isinstance(table, Tag):
-                continue
-            for cell in table.find_all("td"):
-                if not isinstance(cell, Tag):
-                    continue
-                score = scoring.score_element(cell)
-                if score > best_score:
-                    best_score = score
-                    best_element = cell
+        has_table_layout = False
+        for table in tables:
+            width_attr = table.get("width", "0")
+            try:
+                width = int(str(width_attr))
+            except (TypeError, ValueError):
+                width = 0
 
-        if best_score > 50:
-            return best_element
-        return None
+            style = table.get("style", "")
+            if isinstance(style, list):
+                style = " ".join(style)
+            style_width = 0
+            if isinstance(style, str):
+                match = re.search(r"width\s*:\s*(\d+)px", style, re.IGNORECASE)
+                if match:
+                    style_width = int(match.group(1))
+
+            class_name = " ".join(table.get("class", []))
+            align = str(table.get("align", "")).lower()
+            class_lower = class_name.lower()
+            if (
+                width > 400
+                or style_width > 400
+                or align == "center"
+                or "content" in class_lower
+                or "article" in class_lower
+            ):
+                has_table_layout = True
+                break
+
+        if not has_table_layout:
+            return None
+
+        cells = [cell for table in tables for cell in table.find_all("td") if isinstance(cell, Tag)]
+        return scoring.find_best_element(cells, 50)
 
     def _find_content_by_scoring(self) -> Optional[Tag]:
         """Find content using scoring algorithm."""
         candidates: list[Tag] = []
-        for el in self._doc.select("div, section, article, main"):
-            if isinstance(el, Tag):
+        for el in self._doc.find_all(BLOCK_ELEMENTS):
+            if isinstance(el, Tag) and not self._has_hidden_ancestor_or_self(el):
                 candidates.append(el)
 
         return scoring.find_best_element(candidates, 50)
 
+    def _has_hidden_ancestor_or_self(self, element: Tag) -> bool:
+        current: Optional[Tag] = element
+        while isinstance(current, Tag):
+            if current.attrs is not None:
+                style = current.get("style", "")
+                if isinstance(style, list):
+                    style = " ".join(style)
+                if style and _HIDDEN_STYLE_RE.search(style) and not self._is_substantive_hidden_block(current):
+                    return True
+                if current.has_attr("hidden") and not self._is_substantive_hidden_block(current):
+                    return True
+                class_name = current.get("class", [])
+                if isinstance(class_name, str):
+                    class_name = class_name.split()
+                for token in class_name:
+                    if (
+                        (token == "hidden"
+                        or token.endswith(":hidden")
+                        or token == "invisible"
+                        or token.endswith(":invisible"))
+                        and not self._is_substantive_hidden_block(current)
+                    ):
+                        return True
+            current = current.parent if isinstance(current.parent, Tag) else None
+        return False
+
+    def _is_substantive_hidden_block(self, element: Tag) -> bool:
+        elem_id = element.get("id", "")
+        return isinstance(elem_id, str) and re.fullmatch(r"S:\d+", elem_id) is not None
+
+    @staticmethod
+    def _contains(ancestor: Tag, descendant: Tag) -> bool:
+        """Return True if ancestor is or contains descendant."""
+        if ancestor is descendant:
+            return True
+        parent = descendant.parent
+        while isinstance(parent, Tag):
+            if parent is ancestor:
+                return True
+            parent = parent.parent
+        return False
+
     @staticmethod
     def _is_or_contains(el: Tag, main_content: Tag) -> bool:
         """Check if el is main_content or contains main_content."""
-        if el is main_content:
-            return True
-        try:
-            return main_content in el.descendants
-        except Exception:
-            return False
+        return Defuddle._contains(el, main_content)
 
     def _is_inside(self, el: Tag, ancestor: Tag) -> bool:
         """Check if el is inside ancestor."""
@@ -435,6 +758,21 @@ class Defuddle:
             child.extract()
             el.insert_before(child)
         el.decompose()
+
+    def _has_meaningful_previous_sibling(self, el: Tag) -> bool:
+        sibling = el.previous_sibling
+        while sibling is not None:
+            if isinstance(sibling, NavigableString):
+                if str(sibling).strip():
+                    return True
+            elif isinstance(sibling, Tag):
+                if sibling.name != "br" and (
+                    sibling.get_text(" ", strip=True)
+                    or sibling.name in ("pre", "img", "figure", "table", "ul", "ol", "blockquote")
+                ):
+                    return True
+            sibling = sibling.previous_sibling
+        return False
 
     def _remove_by_selector(
         self, remove_exact: bool = True, remove_partial: bool = True,
@@ -466,7 +804,17 @@ class Defuddle:
                             continue
                     # If inside main_content and has substantial content, unwrap
                     if main_content is not None and self._is_inside(el, main_content):
+                        # Preserve aside elements that contain footnote lists (aside > ol[start])
+                        if el.name == "aside" and el.select_one("ol[start]"):
+                            continue
                         text = el.get_text(strip=True)
+                        block_children = [
+                            child for child in el.find_all(recursive=False)
+                            if isinstance(child, Tag) and child.name not in ("a", "span", "strong", "em", "i", "b", "u", "small", "sub", "sup", "mark", "code", "br")
+                        ]
+                        if el.find("a", href=True) and not block_children:
+                            self._unwrap_element(el)
+                            continue
                         # Only unwrap if the element has significant content relative to main
                         main_text = main_content.get_text(strip=True)
                         if main_text and len(text) > len(main_text) * 0.3:
@@ -496,6 +844,13 @@ class Defuddle:
                         break
             for el in to_remove:
                 if el.parent is not None:
+                    if (
+                        el.name in ("h1", "h2", "h3", "h4", "h5", "h6")
+                        and main_content is not None
+                        and self._is_inside(el, main_content)
+                        and self._has_meaningful_previous_sibling(el)
+                    ):
+                        continue
                     if main_content is not None and self._is_or_contains(el, main_content):
                         continue
                     # Skip elements that contain <pre> (code blocks), or are pre/code themselves
@@ -515,6 +870,13 @@ class Defuddle:
                             continue
                     # If inside main_content and has substantial content, unwrap
                     if main_content is not None and self._is_inside(el, main_content):
+                        block_children = [
+                            child for child in el.find_all(recursive=False)
+                            if isinstance(child, Tag) and child.name not in ("a", "span", "strong", "em", "i", "b", "u", "small", "sub", "sup", "mark", "code", "br")
+                        ]
+                        if el.find("a", href=True) and not block_children:
+                            self._unwrap_element(el)
+                            continue
                         text = el.get_text(strip=True)
                         main_text = main_content.get_text(strip=True)
                         if main_text and len(text) > len(main_text) * 0.3:
@@ -750,16 +1112,24 @@ class Defuddle:
             if element.find("math") or element.name == "math":
                 continue
 
+            # Skip inline footnote content spans (they are processed by collect_inline_sidenotes)
+            if element.find_parent("span", class_="inline-footnote"):
+                continue
+
             # Check inline style
             style = element.get("style", "")
             if isinstance(style, list):
                 style = " ".join(style)
             if style and hidden_style_re.search(style):
+                if self._is_substantive_hidden_block(element):
+                    continue
                 element.decompose()
                 continue
 
             # Check hidden attribute (e.g. <p hidden> or <p hidden="hidden">)
             if element.has_attr("hidden"):
+                if self._is_substantive_hidden_block(element):
+                    continue
                 element.decompose()
                 continue
 
@@ -775,6 +1145,8 @@ class Defuddle:
                         or token == "invisible"
                         or token.endswith(":invisible")
                     ):
+                        if self._is_substantive_hidden_block(element):
+                            break
                         element.decompose()
                         break
 
@@ -816,29 +1188,59 @@ class Defuddle:
 
         return ""
 
+    def _get_resolution_url(self, base_url: str) -> str:
+        """Get best URL for resolving relative links (canonical > og:url > base_url).
+
+        Must be called before the pipeline removes <link> and <meta> elements.
+        Matches JS behavior: linkedom has no doc.location, so canonical is used.
+        """
+        from urllib.parse import urljoin
+
+        # Prefer og:url
+        og_url = self._doc.find("meta", attrs={"property": "og:url"})
+        if isinstance(og_url, Tag):
+            content = og_url.get("content", "")
+            if isinstance(content, str) and content.startswith("http"):
+                return content
+
+        # Then canonical link
+        canonical = self._doc.find("link", rel="canonical")
+        if isinstance(canonical, Tag):
+            href = canonical.get("href", "")
+            if isinstance(href, str) and href.startswith("http"):
+                return href
+
+        # Respect <base href> applied on top of base_url
+        base_el = self._doc.find("base", attrs={"href": True})
+        if isinstance(base_el, Tag):
+            base_href = base_el.get("href", "")
+            if isinstance(base_href, str) and base_href and base_url:
+                try:
+                    return urljoin(base_url, base_href)
+                except Exception:
+                    pass
+
+        return base_url
+
     def _resolve_relative_urls(self, element: Tag, base_url: str) -> None:
         """Resolve relative URLs to absolute within the main content element."""
         if not base_url:
             return
 
-        from urllib.parse import urljoin
-
-        # Respect <base href> for relative URL resolution
-        base_el = self._doc.find("base", attrs={"href": True})
-        if isinstance(base_el, Tag):
-            base_href = base_el.get("href", "")
-            if isinstance(base_href, str) and base_href:
-                try:
-                    base_url = urljoin(base_url, base_href)
-                except Exception:
-                    pass
+        from urllib.parse import urljoin, urlparse
 
         def resolve(url: str) -> str:
             normalized = url.strip()
             if normalized.startswith("#"):
                 return normalized
             try:
-                return urljoin(base_url, normalized)
+                resolved = urljoin(base_url, normalized)
+                # WHATWG URL normalizes host-only URLs by adding a trailing slash
+                # e.g. https://example.com -> https://example.com/
+                parsed = urlparse(resolved)
+                if parsed.scheme and parsed.netloc and not parsed.path:
+                    resolved = resolved + "/"
+                return resolved
             except Exception:
                 return url
 

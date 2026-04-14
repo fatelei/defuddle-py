@@ -27,13 +27,18 @@ class HackerNewsExtractor(BaseExtractor):
         """Check if we're on a comment page."""
         if self._main_post is None:
             return False
-        parent_link = self._main_post.select_one('.navs a[href*="parent"]')
-        return parent_link is not None
+        for link in self._main_post.select(".navs a"):
+            if isinstance(link, Tag) and link.get_text(" ", strip=True).lower() == "parent":
+                return True
+        return False
 
     def _find_main_comment(self) -> Optional[Tag]:
         """Find the main comment on a comment page."""
         if self._main_post is None:
             return None
+        comment_container = self._main_post.select_one("td.default")
+        if isinstance(comment_container, Tag):
+            return comment_container
         return self._main_post.select_one(".comment")
 
     def can_extract(self) -> bool:
@@ -114,17 +119,9 @@ class HackerNewsExtractor(BaseExtractor):
 
             parts: list[str] = []
             parts.append('<div class="comment main-comment">')
-            parts.append('<div class="comment-metadata">')
-            parts.append(f'<span class="comment-author"><strong>{author}</strong></span> &bull;')
-            parts.append(f' <span class="comment-date">{date}</span>')
-            if points:
-                parts.append(f' &bull; <span class="comment-points">{points}</span>')
-            if parent_url:
-                parts.append(
-                    f' &bull; <a href="https://news.ycombinator.com/{parent_url}" '
-                    f'class="parent-link">parent</a>'
-                )
-            parts.append("</div>")
+            parts.append("<p>")
+            parts.append(f"<strong>{author}</strong> · {date}")
+            parts.append("</p>")
             parts.append(f'<div class="comment-content">{comment_text}</div>')
             parts.append("</div>")
             return "".join(parts)
@@ -200,7 +197,7 @@ class HackerNewsExtractor(BaseExtractor):
                 blockquote_stack = [0]
             else:
                 if depth < current_depth:
-                    while blockquote_stack and blockquote_stack[-1] >= depth:
+                    while blockquote_stack and blockquote_stack[-1] > depth:
                         html_parts.append("</blockquote>")
                         blockquote_stack.pop()
                 elif depth > current_depth:
@@ -210,13 +207,13 @@ class HackerNewsExtractor(BaseExtractor):
             html_parts.append('<div class="comment">')
             html_parts.append('<div class="comment-metadata">')
             html_parts.append(
-                f'<span class="comment-author"><strong>{author}</strong></span> &bull;'
+                f'<span class="comment-author"><strong>{author}</strong></span> ·'
             )
             html_parts.append(
                 f' <a href="{comment_url}" class="comment-link">{date}</a>'
             )
             if points:
-                html_parts.append(f' &bull; <span class="comment-points">{points}</span>')
+                html_parts.append(f' · <span class="comment-points">{points}</span>')
             html_parts.append("</div>")
             html_parts.append(f'<div class="comment-content">{comment_content}</div>')
             html_parts.append("</div>")

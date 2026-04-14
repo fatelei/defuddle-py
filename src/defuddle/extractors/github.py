@@ -17,6 +17,25 @@ _ISSUE_RE = re.compile(r"/issues/(\d+)")
 _WHITESPACE_RE = re.compile(r"\s+")
 
 
+def _join_code_tokens(parts: list[str]) -> str:
+    result = ""
+    for part in parts:
+        if not part:
+            continue
+        if not result:
+            result = part
+            continue
+        if part in {".", ",", ";", ":", ")", "]", "}"}:
+            result += part
+        elif part in {"(", "["}:
+            result += part
+        elif result.endswith(("(", "[", "{", ".")):
+            result += part
+        else:
+            result += " " + part
+    return result
+
+
 class GitHubExtractor(BaseExtractor):
     """Extracts content from GitHub issues and pull requests."""
 
@@ -36,6 +55,7 @@ class GitHubExtractor(BaseExtractor):
         github_page_indicators = [
             '[data-testid="issue-metadata-sticky"]',
             '[data-testid="issue-title"]',
+            ".js-discussion .timeline-comment-group",
         ]
 
         has_github_indicator = any(
@@ -52,19 +72,21 @@ class GitHubExtractor(BaseExtractor):
 
     def extract(self) -> ExtractorResult:
         """Extract GitHub issue content."""
+        if "/pull/" in self._url:
+            return self._extract_pull_request()
         return self._extract_issue()
 
     def _extract_issue(self) -> ExtractorResult:
-        """Extract GitHub issue content with comprehensive structure."""
+        """Extract GitHub issue content."""
         repo_info = self._extract_repo_info()
         issue_number = self._extract_issue_number()
-
         content_parts: list[str] = []
-
-        # Extract the main issue body
         issue_container = self._doc.select_one(
             '[data-testid="issue-viewer-issue-container"]'
         )
+        issue_author = ""
+        issue_timestamp = ""
+        association_text = ""
         if issue_container:
             issue_author = self._extract_author(
                 issue_container,
@@ -76,87 +98,34 @@ class GitHubExtractor(BaseExtractor):
             )
 
             issue_time_element = issue_container.select_one("relative-time")
-            issue_timestamp = ""
             if issue_time_element:
                 dt = issue_time_element.get("datetime", "")
                 if isinstance(dt, str):
                     issue_timestamp = dt
+
+            association = issue_container.select_one('[data-testid="comment-author-association"]')
+            if association:
+                association_text = association.get_text(" ", strip=True)
 
             issue_body_element = issue_container.select_one(
                 '[data-testid="issue-body-viewer"] .markdown-body'
             )
             if issue_body_element:
                 body_content = self._clean_body_content(issue_body_element)
-
-                author_line = f'<div class="issue-author"><strong>{issue_author}</strong>'
-                if issue_timestamp:
-                    try:
-                        dt = datetime.fromisoformat(issue_timestamp.replace("Z", "+00:00"))
-                        author_line += f' opened this issue on {dt.strftime("%B %d, %Y")}'
-                    except (ValueError, TypeError):
-                        pass
-                author_line += "</div>"
-                content_parts.append(author_line)
-                content_parts.append(
-                    f'<div class="issue-body">{body_content}</div>'
-                )
-
-        # Extract comments
-        comment_elements = self._doc.select("[data-wrapper-timeline-id]")
-        processed_comments: set[str] = set()
-
-        for comment_element in comment_elements:
-            if not isinstance(comment_element, Tag):
-                continue
-
-            comment_container = comment_element.select_one(".react-issue-comment")
-            if comment_container is None:
-                continue
-
-            comment_id = str(comment_element.get("data-wrapper-timeline-id", ""))
-            if not comment_id or comment_id in processed_comments:
-                continue
-            processed_comments.add(comment_id)
-
-            author = self._extract_author(
-                comment_container,
-                [
-                    "a[data-testid='avatar-link']",
-                    'a[href^="/"][data-hovercard-url*="/users/"]',
-                ],
-            )
-
-            time_element = comment_container.select_one("relative-time")
-            timestamp = ""
-            if time_element:
-                dt_val = time_element.get("datetime", "")
-                if isinstance(dt_val, str):
-                    timestamp = dt_val
-
-            body_element = comment_container.select_one(".markdown-body")
-            if body_element:
-                body_content = self._clean_body_content(body_element)
-                if body_content:
-                    comment_header = f'<div class="comment-header"><strong>{author}</strong>'
-                    if timestamp:
-                        try:
-                            dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-                            comment_header += f' commented on {dt.strftime("%B %d, %Y")}'
-                        except (ValueError, TypeError):
-                            pass
-                    comment_header += "</div>"
-                    content_parts.append('<div class="comment">')
-                    content_parts.append(comment_header)
+                if issue_author:
                     content_parts.append(
-                        f'<div class="comment-body">{body_content}</div>'
+                        f'<p><a href="https://github.com/{issue_author}">{issue_author}</a></p>'
                     )
-                    content_parts.append("</div>")
+                if association_text:
+                    content_parts.append(f"<p>{association_text}</p>")
+                content_parts.append(body_content)
 
         content_html = "\n".join(content_parts)
         description = self._create_description(content_html)
 
         title_el = self._doc.find("title")
         title = title_el.get_text(strip=True) if title_el else ""
+        title = re.sub(r"\s+·\s+[^·]+/[^·]+$", "", title)
 
         return ExtractorResult(
             content=content_html,
@@ -169,9 +138,85 @@ class GitHubExtractor(BaseExtractor):
             },
             variables={
                 "title": title,
-                "author": "",
-                "site": f"GitHub - {repo_info['owner']}/{repo_info['repo']}",
+                "author": issue_author,
+                "site": "GitHub",
                 "description": description,
+                "published": issue_timestamp,
+            },
+        )
+
+    def _extract_pull_request(self) -> ExtractorResult:
+        """Extract old-layout GitHub pull request content."""
+        repo_info = self._extract_repo_info()
+        discussion = self._doc.select_one(".js-discussion")
+        groups = []
+        if discussion:
+            groups = [
+                group
+                for group in discussion.select(".timeline-comment-group")
+                if isinstance(group, Tag)
+            ]
+
+        body_html = ""
+        comments: list[str] = []
+        author = ""
+        published = ""
+
+        for idx, group in enumerate(groups):
+            body = group.select_one(".comment-body.markdown-body")
+            header_author = group.select_one(".author")
+            header_time = group.select_one("relative-time")
+            if not body:
+                continue
+            body_content = self._clean_body_content(body)
+            if not body_content:
+                continue
+            if idx == 0:
+                body_html = body_content
+                if header_author:
+                    href = str(header_author.get("href", ""))
+                    author = href.strip("/") if href.startswith("/") else header_author.get_text(strip=True)
+                if header_time:
+                    dt = header_time.get("datetime", "")
+                    if isinstance(dt, str):
+                        published = dt
+                continue
+
+            if body_content == body_html:
+                continue
+
+            comment_author = header_author.get_text(" ", strip=True) if header_author else "Unknown"
+            comment_date = ""
+            if header_time:
+                dt_val = header_time.get("datetime", "")
+                if isinstance(dt_val, str) and dt_val:
+                    try:
+                        dt = datetime.fromisoformat(dt_val.replace("Z", "+00:00"))
+                        comment_date = dt.strftime("%Y-%m-%d")
+                    except (ValueError, TypeError):
+                        comment_date = dt_val
+            header = f"<p><strong>{comment_author}</strong>"
+            if comment_date:
+                header += f" · {comment_date}"
+            header += "</p>"
+            comments.append(f"<blockquote>{header}{body_content}</blockquote>")
+
+        content_parts = [body_html] if body_html else []
+        if comments:
+            content_parts.extend(["<hr>", "<h2>Comments</h2>", *comments])
+
+        title_el = self._doc.find("title")
+        title = title_el.get_text(strip=True) if title_el else ""
+        content_html = "\n".join(part for part in content_parts if part)
+        return ExtractorResult(
+            content=content_html,
+            content_html=content_html,
+            variables={
+                "title": title,
+                "author": author,
+                "site": f"GitHub - {repo_info['owner']}/{repo_info['repo']}",
+                "published": published,
+                "description": self._create_description(content_html),
             },
         )
 
@@ -202,6 +247,22 @@ class GitHubExtractor(BaseExtractor):
         # Remove clipboard elements
         for el in temp_soup.select(".js-clipboard-copy, .zeroclipboard-container"):
             el.decompose()
+
+        for blob in list(temp_soup.select(".blob-wrapper-embedded")):
+            if not isinstance(blob, Tag):
+                continue
+            line = blob.select_one("td.blob-code")
+            if not line:
+                continue
+            code_text = _join_code_tokens([part.strip() for part in line.stripped_strings if part.strip()])
+            if not code_text:
+                continue
+            pre = temp_soup.new_tag("pre")
+            code = temp_soup.new_tag("code")
+            code.string = code_text
+            pre.append(code)
+            wrapper = blob.parent if isinstance(blob.parent, Tag) and blob.parent.name == "div" else blob
+            wrapper.replace_with(pre)
 
         return temp_soup.decode_contents().strip()
 

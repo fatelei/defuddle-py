@@ -148,9 +148,8 @@ class RedditExtractor(BaseExtractor):
         # Fallback: alternative comment selectors
         if not comments:
             fallback_selectors = [
+                ".thing.comment",
                 "div[data-testid='comment']",
-                ".comment",
-                ".comment-area .comment",
             ]
             for selector in fallback_selectors:
                 comments = self._doc.select(selector)
@@ -164,6 +163,9 @@ class RedditExtractor(BaseExtractor):
 
     def _process_comments(self, comments: list[Tag]) -> str:
         """Process comments with proper nesting."""
+        if comments and comments[0].name != "shreddit-comment":
+            return self._process_legacy_comments(comments)
+
         html_parts: list[str] = []
         current_depth = -1
         blockquote_stack: list[int] = []
@@ -213,6 +215,9 @@ class RedditExtractor(BaseExtractor):
                     while blockquote_stack and blockquote_stack[-1] >= depth:
                         html_parts.append("</blockquote>")
                         blockquote_stack.pop()
+                    if depth > 0:
+                        html_parts.append("<blockquote>")
+                        blockquote_stack.append(depth)
                 elif depth > current_depth:
                     html_parts.append("<blockquote>")
                     blockquote_stack.append(depth)
@@ -220,11 +225,11 @@ class RedditExtractor(BaseExtractor):
             html_parts.append('<div class="comment">')
             html_parts.append('<div class="comment-metadata">')
             html_parts.append(
-                f'<span class="comment-author"><strong>{author}</strong></span> &bull;'
+                f'<span class="comment-author"><strong>{author}</strong></span> ·'
             )
             html_parts.append(
                 f' <a href="https://reddit.com{permalink}" class="comment-link">'
-                f"{score} points</a> &bull;"
+                f"{score} points</a> ·"
             )
             html_parts.append(f' <span class="comment-date">{date}</span>')
             html_parts.append("</div>")
@@ -234,6 +239,79 @@ class RedditExtractor(BaseExtractor):
             current_depth = depth
 
         # Close remaining blockquotes
+        while blockquote_stack:
+            html_parts.append("</blockquote>")
+            blockquote_stack.pop()
+
+        return "".join(html_parts)
+
+    def _process_legacy_comments(self, comments: list[Tag]) -> str:
+        html_parts: list[str] = []
+        current_depth = -1
+        blockquote_stack: list[int] = []
+
+        for comment in comments:
+            if not isinstance(comment, Tag):
+                continue
+            author = str(comment.get("data-author", "")) or (
+                comment.select_one(".author").get_text(strip=True)
+                if comment.select_one(".author")
+                else ""
+            )
+            score_el = comment.select_one(".score")
+            score = score_el.get_text(" ", strip=True) if score_el else "0 points"
+            permalink = str(comment.get("data-permalink", ""))
+            time_el = comment.select_one("time[datetime]")
+            date = ""
+            if isinstance(time_el, Tag):
+                datetime_attr = str(time_el.get("datetime", ""))
+                if datetime_attr:
+                    date = datetime_attr.split("T")[0]
+            content_element = comment.select_one(".usertext-body .md")
+            content = content_element.decode_contents() if isinstance(content_element, Tag) else ""
+
+            depth = 0
+            parent = comment.parent
+            while isinstance(parent, Tag):
+                classes = parent.get("class", [])
+                if isinstance(classes, str):
+                    classes = classes.split()
+                if "thing" in classes and "comment" in classes:
+                    depth += 1
+                parent = parent.parent
+
+            if depth == 0:
+                while blockquote_stack:
+                    html_parts.append("</blockquote>")
+                    blockquote_stack.pop()
+                html_parts.append("<blockquote>")
+                blockquote_stack = [0]
+            else:
+                if depth < current_depth:
+                    while blockquote_stack and blockquote_stack[-1] >= depth:
+                        html_parts.append("</blockquote>")
+                        blockquote_stack.pop()
+                    html_parts.append("<blockquote>")
+                    blockquote_stack.append(depth)
+                elif depth > current_depth:
+                    html_parts.append("<blockquote>")
+                    blockquote_stack.append(depth)
+
+            html_parts.append('<div class="comment">')
+            html_parts.append('<div class="comment-metadata">')
+            html_parts.append(
+                f'<span class="comment-author"><strong>{author}</strong></span> ·'
+            )
+            html_parts.append(
+                f' <a href="https://reddit.com{permalink}" class="comment-link">{date}</a> ·'
+            )
+            html_parts.append(f" {score}")
+            html_parts.append("</div>")
+            html_parts.append(f'<div class="comment-content">{content}</div>')
+            html_parts.append("</div>")
+
+            current_depth = depth
+
         while blockquote_stack:
             html_parts.append("</blockquote>")
             blockquote_stack.pop()
@@ -256,10 +334,21 @@ class RedditExtractor(BaseExtractor):
             author = self._shreddit_post.get("author")
             if isinstance(author, str):
                 return author
+        legacy_post = self._doc.select_one(".thing.link[data-author]")
+        if isinstance(legacy_post, Tag):
+            author = legacy_post.get("data-author", "")
+            if isinstance(author, str):
+                return author
         return ""
 
     def _get_post_title(self) -> str:
         """Extract the post title."""
+        legacy_title = self._doc.select_one(".thing.link .title")
+        if isinstance(legacy_title, Tag):
+            title = legacy_title.get_text(strip=True)
+            if title:
+                return title
+
         h1 = self._doc.select_one("h1")
         if h1:
             title = h1.get_text(strip=True)

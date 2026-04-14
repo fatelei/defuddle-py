@@ -102,6 +102,7 @@ class XArticleExtractor(BaseExtractor):
         self._convert_embedded_tweets(container)
         self._convert_code_blocks(container)
         self._convert_headers(container)
+        self._normalize_author_spacer(container)
         self._unwrap_linked_images(container)
         self._upgrade_image_quality(container)
         self._convert_bold_spans(container)
@@ -167,7 +168,7 @@ class XArticleExtractor(BaseExtractor):
             if language:
                 new_code["data-lang"] = language
                 new_code["class"] = f"language-{language}"
-            new_code.string = code.get_text()
+            new_code.string = code.get_text().strip("\n")
             new_pre.append(new_code)
 
             block.replace_with(new_pre)
@@ -182,6 +183,20 @@ class XArticleExtractor(BaseExtractor):
             new_header = self._doc.new_tag(header.name)
             new_header.string = text
             header.replace_with(new_header)
+
+    def _normalize_author_spacer(self, container: Tag) -> None:
+        for author in container.select('[itemprop="author"]'):
+            if not isinstance(author, Tag):
+                continue
+            if any(
+                isinstance(child, Tag) and child.name not in {"meta"}
+                for child in author.children
+            ):
+                continue
+            spacer = self._doc.new_tag("p")
+            spacer["data-defuddle-x-spacer"] = "true"
+            spacer.string = " "
+            author.replace_with(spacer)
 
     def _unwrap_linked_images(self, container: Tag) -> None:
         for img in container.select('[data-testid="tweetPhoto"] img'):
@@ -230,7 +245,7 @@ class XArticleExtractor(BaseExtractor):
             span.replace_with(strong)
 
     def _convert_draft_paragraphs(self, container: Tag) -> None:
-        for div in container.select(".longform-unstyled, .public-DraftStyleDefault-block"):
+        for div in container.select(".public-DraftStyleDefault-block"):
             if not isinstance(div, Tag):
                 continue
             p = self._doc.new_tag("p")
@@ -259,7 +274,7 @@ class XArticleExtractor(BaseExtractor):
                     if isinstance(node, NavigableString):
                         text = str(node)
                         if text.strip():
-                            p.append(NavigableString(text))
+                            p.append(NavigableString(re.sub(r"\s+", " ", text)))
 
             for child in list(div.children):
                 process_node(child)

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.29.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,7 +7,7 @@ name = "defuddle"
 version = "0.1.0"
 description = "Extract the main content from a web page using Python"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.14"
 license = "MIT"
 dependencies = [
     "beautifulsoup4>=0.4",
@@ -16,6 +16,7 @@ dependencies = [
     "pyld>=2.0",
     "httpx>=0.27",
     "markdownify>=1.2.2",
+    "mathml-to-latex>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -29,6 +30,13 @@ defuddle = "defuddle.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/defuddle"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/README.md",
+    "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
